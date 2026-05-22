@@ -1,0 +1,44 @@
+# Default SLX filter configuration for slx_process / process_model_tree
+#
+# default_attrs  : block attributes kept for every block
+# default_params : extra parameters kept for all block types
+# block_types    : per-type parameter lists (beyond default_attrs)
+# skip_blocks    : block types removed entirely; connections are stitched through
+
+default_attrs:
+  - name
+  - type
+  - input_ports
+  - output_ports
+
+default_params: []
+
+block_types:
+  Constant:                [Value]
+  Gain:                    [Gain]
+  Sum:                     [Inputs]
+  Saturate:                [UpperLimit, LowerLimit]
+  Switch:                  [Criteria, Threshold]
+  Lookup_n-D:              [Table, BreakpointsForDimension1, BreakpointsForDimension2]
+  PreLookup:               [BreakpointsData]
+  Interpolation_n-D:       [Table]
+  RateLimiter:             [RisingSlew, FallingSlew]
+  DiscreteIntegrator:      [gainval, InitialCondition]
+  TransferFcn:             [Numerator, Denominator]
+  PID Controller:          [P, I, D, N, Form, TimeDomain]
+  Discrete PID Controller: [P, I, D, N, Form, TimeDomain]
+  From:                    [GotoTag]
+  Goto:                    [GotoTag]
+  EnablePort:              [StatesWhenEnabling]
+  SubSystem:               [ReferencedSubsystem]
+  Reference:               [SourceBlock, SourceType]
+  Enumerated Constant:     [Value]
+  Chart:                   [SFBlockType]
+  MinMax:                  [Function]
+  Logic:                   [Operator]
+  RelationalOperator:      [Operator]
+
+skip_blocks:
+  - SignalConversion
+  - DataTypeConversion
+  - Terminator
