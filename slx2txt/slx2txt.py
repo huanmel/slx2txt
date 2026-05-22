@@ -653,6 +653,14 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: str = None) -> str:
 
     # Transitions
     transitions = chart_dict.get('transitions', [])
+    # Sort by (from-path, order) so transitions from the same source are emitted
+    # in ascending execution-order. Stateflow auto-assigns order by creation
+    # sequence, so this prevents renumbering conflicts when we later set
+    # ExecutionOrder explicitly.
+    transitions = sorted(
+        transitions,
+        key=lambda t: (t.get('from', ''), int(t.get('order', '0')))
+    )
     if transitions:
         lines.append('')
         lines.append('%% Transitions')
@@ -679,6 +687,8 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: str = None) -> str:
             lines.append(f"% WARNING: destination state '{dst_path}' not found")
         if label:
             lines.append(f"{tv}.LabelString = {_matlab_str_literal(label)};")
+        if tr.get('order'):
+            lines.append(f"{tv}.ExecutionOrder = {tr['order']};")
         # Set explicit endpoint clock positions and midpoint so MATLAB keeps
         # the arc inside its natural parent (LCA).  Without this, MATLAB's
         # default arc routing for backward transitions goes above the states,
