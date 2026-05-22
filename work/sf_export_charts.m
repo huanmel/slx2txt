@@ -30,15 +30,27 @@ if isempty(machine)
     return;
 end
 
+% Top-level charts
 charts = machine.find('-isa', 'Stateflow.Chart');
 pngPaths = {};
 for i = 1:numel(charts)
-    % Use full path (e.g. "Model/Subsystem/Chart") to avoid name collisions
     safeName = regexprep(charts(i).Path, '[/\\:*?"<>| ]', '_');
     outFile  = fullfile(outputDir, [safeName '.png']);
     sfprint(charts(i), 'png', outFile);
     pngPaths{end+1} = outFile; %#ok<AGROW>
-    fprintf('  -> %s\n', outFile);
+    fprintf('  [chart]    -> %s\n', outFile);
 end
-fprintf('Exported %d chart(s) to: %s\n', numel(pngPaths), outputDir);
+
+% Subchart states (IsSubchart=true — collapsed in parent view, need separate export)
+subcharts = machine.find('-isa', 'Stateflow.State', 'IsSubchart', true);
+for i = 1:numel(subcharts)
+    fullPath = [subcharts(i).Path '/' subcharts(i).Name];
+    safeName = regexprep(fullPath, '[/\\:*?"<>| ]', '_');
+    outFile  = fullfile(outputDir, [safeName '.png']);
+    sfprint(subcharts(i), 'png', outFile);
+    pngPaths{end+1} = outFile; %#ok<AGROW>
+    fprintf('  [subchart] -> %s\n', outFile);
+end
+
+fprintf('Exported %d image(s) to: %s\n', numel(pngPaths), outputDir);
 end
