@@ -306,9 +306,59 @@ _SF_LEAF_H       = 80    # minimum height of a leaf state
 _SF_HEADER_H     = 30    # top strip reserved for state name label inside a parent
 _SF_PADDING      = 20    # inner padding between parent edge and children
 _SF_GAP          = 20    # gap between sibling states
-_SF_MAX_COLS     = 4     # max columns before wrapping to a new row
+_SF_MAX_COLS     = 4     # max columns in a single row (horizontal layout)
+_SF_VERT_THRESH  = 5     # switch to single-column vertical layout above this many normal children
 _SF_LABEL_LINE_H = 16    # pixels per text line in label
 _SF_LABEL_PAD    = 20    # top+bottom padding inside leaf label area
+
+
+def _bfs_order(states_dict: Dict, transitions: list,
+               path_prefix: str, skip_names: set) -> list:
+    """Return normal-state names ordered by BFS from the default state.
+
+    Visits states in execution-flow order by following outgoing transitions.
+    States unreachable from the start node are appended in original dict order.
+    Cyclic transitions are handled safely (each node visited at most once).
+    """
+    from collections import deque
+    child_names = [n for n in states_dict if n not in skip_names]
+    if not child_names:
+        return []
+
+    child_set = set(child_names)
+
+    # Build adjacency list: src → [dst, ...] (only within this container)
+    adj: Dict[str, list] = {n: [] for n in child_names}
+    for t in transitions:
+        src = _direct_child_name(t.get('from', ''), path_prefix)
+        dst = _direct_child_name(t.get('to', ''), path_prefix)
+        if src in child_set and dst in child_set and src != dst and dst not in skip_names:
+            if dst not in adj[src]:
+                adj[src].append(dst)
+
+    # Start from the explicit default state; fall back to first in dict order
+    start = next((n for n in states_dict if states_dict[n].get('default') and n not in skip_names),
+                 child_names[0])
+
+    visited: set = set()
+    result: list = []
+    queue: deque = deque([start])
+    while queue:
+        node = queue.popleft()
+        if node in visited:
+            continue
+        visited.add(node)
+        result.append(node)
+        for neighbor in adj[node]:
+            if neighbor not in visited:
+                queue.append(neighbor)
+
+    # Append anything not reachable from start (e.g. disconnected states)
+    for name in child_names:
+        if name not in visited:
+            result.append(name)
+
+    return result
 
 
 def _sf_label_height(state_body: Dict) -> int:
@@ -364,8 +414,11 @@ def _sf_state_size(state_body: Dict, transitions=None, path_prefix: str = '') ->
     names = list(children.keys())
 
     sink_names = _find_sink_states(children, transitions or [], path_prefix) if transitions is not None else set()
-    normal_names = [n for n in names if n not in sink_names]
-    sink_list    = [n for n in names if n in sink_names]
+    if transitions is not None:
+        normal_names = _bfs_order(children, transitions, path_prefix, sink_names)
+    else:
+        normal_names = [n for n in names if n not in sink_names]
+    sink_list = [n for n in names if n in sink_names]
     if not normal_names:
         normal_names = names
         sink_list = []
@@ -377,7 +430,7 @@ def _sf_state_size(state_body: Dict, transitions=None, path_prefix: str = '') ->
              for name in names}
 
     n = len(normal_names)
-    cols = min(n, _SF_MAX_COLS)
+    cols = 1 if n > _SF_VERT_THRESH else min(n, _SF_MAX_COLS)
     rows = math.ceil(n / cols)
 
     col_w = [
@@ -416,8 +469,11 @@ def _compute_sf_layout(states_dict: Dict, origin_x: int = 20, origin_y: int = 20
         return result
 
     sink_names = _find_sink_states(states_dict, transitions or [], path_prefix) if transitions is not None else set()
-    normal_names = [name for name in names if name not in sink_names]
-    sink_list    = [name for name in names if name in sink_names]
+    if transitions is not None:
+        normal_names = _bfs_order(states_dict, transitions, path_prefix, sink_names)
+    else:
+        normal_names = [name for name in names if name not in sink_names]
+    sink_list = [name for name in names if name in sink_names]
     if not normal_names:
         normal_names = names
         sink_list = []
@@ -429,7 +485,7 @@ def _compute_sf_layout(states_dict: Dict, origin_x: int = 20, origin_y: int = 20
              for name in names}
 
     n_norm = len(normal_names)
-    cols = min(n_norm, _SF_MAX_COLS)
+    cols = 1 if n_norm > _SF_VERT_THRESH else min(n_norm, _SF_MAX_COLS)
     rows = math.ceil(n_norm / cols)
 
     col_w = [
