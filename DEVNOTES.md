@@ -6,7 +6,7 @@ gaps discovered during the sl2py session (May 2026).
 
 ---
 
-## Project structure (files to move)
+## Project structure
 
 ```
 slxgen/
@@ -19,13 +19,36 @@ data/
   model/pid_control_ex1.slx ← test model (used in slx2txt __main__ block)
 
 work/
-  process_model.py    ← main processing script (hardcodes model paths)
-  compare_models.py   ← compares two model slim dicts
-  compare_trees.py    ← compares model trees
+  process_model.py              ← main processing script (hardcodes model paths)
+  compare_models.py             ← compares two model slim dicts
+  compare_trees.py              ← compares model trees
   sf_yaml_to_matlab_HMI_StMach.py ← generate MATLAB script from sf.yaml
+  sf_export_charts.m            ← export all Stateflow charts in a model to PNG
 ```
 
-No shared code with `ddgen/`. Dependencies: stdlib + `pyyaml` only.
+Dependencies: stdlib + `pyyaml` only. No shared code with `slddgen/` or `dbcgen/`.
+
+---
+
+## Development environment
+
+**Python** — miniforge3 `base` conda environment (`C:\Users\ivanm\miniforge3\python.exe`).
+All three generator projects are installed as editable packages into `base`:
+
+```
+pip install -e C:\D\proj\gh\slxgen
+pip install -e C:\D\proj\gh\slddgen
+pip install -e C:\D\proj\gh\dbcgen
+```
+
+After that, `from slxgen import ...` works anywhere without `sys.path` hacks.
+To reinstall after a fresh clone: `pip install -e .` from inside each repo root.
+
+**MATLAB** — R2024a. A MATLAB MCP server is available for automated execution:
+
+- `evaluate_matlab_code` — run inline MATLAB commands
+- `run_matlab_file` — run a `.m` script
+- `check_matlab_code` — static analysis
 
 ---
 
@@ -370,24 +393,73 @@ chart_dict = stateflow_chart_to_dict(sf)   # sf = blk['stateflow'] from slim
 
 ---
 
+## Stateflow generation round-trip
+
+Full workflow from source SLX to a regenerated model with visual review:
+
+### Step 1 — Extract sf.yaml from SLX (Python)
+
+```python
+# produces HMIDrvrDp187_sub_reports/HMI_StMach_sf.yaml
+python work/process_model.py
+# or via API:
+from slxgen import slx_process
+slx_process(slx_path, filters, outputs=['sf.yaml'])
+```
+
+### Step 2 — Generate MATLAB script from sf.yaml (Python)
+
+```python
+# produces HMIDrvrDp187_sub_reports/HMI_StMach_sf.m
+python work/sf_yaml_to_matlab_HMI_StMach.py
+# or via API:
+from slxgen import sf_yaml_to_matlab
+sf_yaml_to_matlab(yaml_path, output_path=output_path)
+```
+
+### Step 3 — Run the script in MATLAB
+
+In MATLAB (or via MCP `evaluate_matlab_code`):
+
+```matlab
+run('path\to\HMI_StMach_sf.m')
+% Creates HMI_StMach.slx in the current working directory.
+% Expected warnings:
+%   "Automated layout might not improve upon original layout" — cosmetic
+%   "underspecified signal dimensions" — expected, no plant connected
+```
+
+### Step 4 — Export charts to PNG for review
+
+```matlab
+% addpath to work/ folder first
+pngPaths = sf_export_charts('HMI_StMach');
+% or with explicit output dir:
+pngPaths = sf_export_charts(modelPath, outputDir);
+```
+
+`sf_export_charts.m` finds all `Stateflow.Chart` objects in the model, exports
+each to a PNG named after its full hierarchy path (e.g.
+`HMI_StMach_HMI_StMach.png`), and prints the paths. The PNG can be read back
+by Claude (multimodal) for automated layout review without manual screenshots.
+
+---
+
 ## Known gaps / future work
 
 - **MATLAB Function blocks**: listed in machine.xml but not parsed (different
   internal structure, not standard Stateflow states/transitions)
-- **sf.yaml → SLX creation**: `stateflow_dict_to_matlab(chart_dict)` generates a MATLAB
-  `.m` script using the Stateflow API. `sf_yaml_to_matlab(yaml_path)` reads a yaml and
-  returns the script. `slx_process(..., outputs=['sf.m'])` saves it alongside sf.yaml.
-  Limitation: `sfAutoArrange` is called at the end but manual layout may still be needed.
+- **sf.yaml → SLX creation**: layout is computed by `_compute_sf_layout()` in
+  `stateflow.py` (BFS ordering, sink sidebar, vertical stacking for wide containers).
+  `sfAutoArrange` is also called but has no effect when positions are already set.
+  Manual layout tweaks may still be needed for complex charts.
 - **ReferencedSubsystem charts**: charts inside cross-file referenced subsystems
   (e.g. `ClimCtl_sub`) are found when that SLX is processed by `process_model_tree`.
   They do NOT appear in the parent model's sf.yaml export.
-- **Transition label parsing**: `_parse_transition_label()` now correctly splits
-  `after(InitTout,tick)[HMI_Online && ~VerCheckOk]{HMI_fault=...}` into
-  `trigger`, `condition`, and `action` fields. `trigger` appears in sf.yaml and report.txt.
-- **`_arch.md` output**: Mermaid diagram generation exists but was disabled in
-  `process_model.py` for current workflow (user only needs report.txt + sf.yaml)
-- **No `__init__.py`**: notebooks use `sys.path.insert` hack. Add `__init__.py`
-  to make it a proper package
+- **MATLAB Function blocks**: listed in machine.xml but not parsed (different
+  internal structure, not standard Stateflow states/transitions).
+- **`_arch.md` output**: Mermaid diagram generation exists but is disabled in
+  `process_model.py` for current workflow (only report.txt + sf.yaml needed).
 
 ---
 
