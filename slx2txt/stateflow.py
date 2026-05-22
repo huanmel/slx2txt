@@ -585,7 +585,13 @@ def _sf_states_to_matlab_lines(
         lines.append(f"{var}.LabelString = {_matlab_str_literal(label)};")
         if full_path in positions:
             x, y, w, h = positions[full_path]
-            lines.append(f"{var}.Position = [{x} {y} {w} {h}];")
+            # Stateflow Position is in the parent's LOCAL coordinate space.
+            # Subtract parent's global top-left so children always start at small offsets.
+            if path_prefix and path_prefix in positions:
+                px, py = positions[path_prefix][0], positions[path_prefix][1]
+            else:
+                px, py = 0, 0
+            lines.append(f"{var}.Position = [{x - px} {y - py} {w} {h}];")
 
         if state_body.get('subchart'):
             lines.append(f"{var}.IsSubchart = true;")
@@ -720,7 +726,12 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: str = None) -> str:
             dst_cx = dx + dw // 2
             mid_x  = (src_cx + dst_cx) // 2
             mid_y  = ((sy + sh // 2) + (dy + dh // 2)) // 2
-            lines.append(f"{tv}.MidPoint = [{mid_x} {mid_y}];")
+            # MidPoint is in the LCA container's LOCAL coordinate space.
+            if lca and lca in positions:
+                lca_x, lca_y = positions[lca][0], positions[lca][1]
+            else:
+                lca_x, lca_y = 0, 0
+            lines.append(f"{tv}.MidPoint = [{mid_x - lca_x} {mid_y - lca_y}];")
             if src_cx <= dst_cx:
                 lines.append(f"{tv}.SourceOClock = 3;")
                 lines.append(f"{tv}.DestinationOClock = 9;")
