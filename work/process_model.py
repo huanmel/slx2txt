@@ -17,8 +17,7 @@ import yaml
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8')
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from slx2txt import process_model_tree
+from slxgen import process_model_tree
 
 
 # PROJ_ROOT   = r'C:\Users\ivanm\Documents\MATLAB\EKL\dp190_ox\dp190_ox_csw\.deps\comps\apps\tcuapp0'

@@ -16,8 +16,7 @@ import sys
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8')
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from slx2txt import slx_process, compare_models
+from slxgen import slx_process, compare_models
 
 
 MODELS = {

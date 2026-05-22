@@ -1,4 +1,4 @@
-# slx2txt — Developer Notes
+# slxgen — Developer Notes
 
 Comprehensive notes for continuing development. Captures architecture,
 Simulink XML quirks, all non-obvious implementation decisions, and known
@@ -9,18 +9,20 @@ gaps discovered during the sl2py session (May 2026).
 ## Project structure (files to move)
 
 ```
-slx2txt/
+slxgen/
   slx2txt.py          ← entire library (one file)
-  cli_slx2txt.py      ← empty placeholder for CLI
+  stateflow.py        ← stateflow parsing and MATLAB generation
+  cli.py              ← CLI entry point
 
 data/
-  slx_filters_default.yml   ← default filter config (referenced by notebooks)
+  slx_filters_default.yml   ← default filter config (referenced by work scripts)
   model/pid_control_ex1.slx ← test model (used in slx2txt __main__ block)
 
-notebooks/
+work/
   process_model.py    ← main processing script (hardcodes model paths)
   compare_models.py   ← compares two model slim dicts
   compare_trees.py    ← compares model trees
+  sf_yaml_to_matlab_HMI_StMach.py ← generate MATLAB script from sf.yaml
 ```
 
 No shared code with `ddgen/`. Dependencies: stdlib + `pyyaml` only.

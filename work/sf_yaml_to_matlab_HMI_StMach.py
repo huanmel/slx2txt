@@ -12,8 +12,7 @@ import sys
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8')
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from slx2txt import sf_yaml_to_matlab
+from slxgen import sf_yaml_to_matlab
 
 
 YAML_PATH   = Path(r'C:\Users\ivanm\Documents\MATLAB\EKL\dp187_ravo\dp187_csw\.deps\comps\drivers\hmidrvrdp187\models\HMIDrvrDp187_sub_reports\HMI_StMach_sf.yaml')
