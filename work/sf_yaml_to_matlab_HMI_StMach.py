@@ -15,7 +15,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 from slxgen import sf_yaml_to_matlab
 
 
-YAML_PATH   = Path(r'C:\Users\ivanm\Documents\MATLAB\EKL\dp187_ravo\dp187_csw\.deps\comps\drivers\hmidrvrdp187\models\HMIDrvrDp187_sub_reports\HMI_StMach_sf.yaml')
+YAML_PATH   = Path(r'C:\D\proj\gh\slxgen\work\HMI_example\HMIDrvrDp187_sub_reports\HMI_StMach_sf.yaml')
 OUTPUT_PATH = YAML_PATH.parent / 'HMI_StMach_sf.m'
 
 # %%
