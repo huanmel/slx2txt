@@ -71,18 +71,23 @@ def _compound_header_h(body: dict) -> int:
 
 def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
                    max_label_width: int = _LABEL_MAX_WIDTH_PX,
-                   label_substitution: bool = True) -> dict:
+                   label_substitution: bool = True,
+                   direction: str = 'DOWN') -> dict:
     """Build an ELK graph JSON from a chart_dict (sf.yaml structure).
 
     chart_dict must have 'states' and optionally 'transitions' keys.
     Default transitions (no 'from') are skipped — handled by Stateflow default arrow logic.
     layout_options: optional dict of ELK option key→value pairs that override the defaults
                     for the root graph and all compound nodes.  Example:
-                    {'elk.direction': 'RIGHT', 'elk.edgeRouting': 'SPLINES'}
+                    {'elk.edgeRouting': 'ORTHOGONAL'}
     label_substitution: when True (default), edges carry no label dimensions — ELK routes
                     purely geometrically and does not bend arcs to accommodate label text width.
                     MidPoints are still computed from ELK sections; Stateflow renders the actual
                     label at that position.  Set False to pass real label sizes to ELK.
+    direction: main layout direction — 'DOWN' (default, vertical chain) or 'RIGHT' (horizontal
+                    chain, matches how human engineers typically draw flat state machines).
+                    AND_STATE (parallel) compound nodes always use 'RIGHT' regardless.
+                    Can be further overridden per-node via layout_options.
     """
     # Lazy imports to avoid circular dependency (stateflow.py imports elk_layout.py)
     from slxgen.stateflow import _sf_state_size, _lca_path, _find_sink_states, _direct_child_name  # noqa: PLC0415
@@ -118,11 +123,11 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
             edge['labels'] = [{'text': label_text, 'width': lw, 'height': lh}]
         lca_edges.setdefault(lca, []).append(edge)
 
-    def _compound_options(direction: str, body: dict) -> dict:
+    def _compound_options(node_direction: str, body: dict) -> dict:
         top_pad = _compound_header_h(body)
         opts = {
             'elk.padding':                                  f'[top={top_pad},right=20,bottom=20,left=20]',
-            'elk.direction':                                direction,
+            'elk.direction':                                node_direction,
             'elk.spacing.nodeNode':                         '50',
             'elk.layered.spacing.nodeNodeBetweenLayers':    '60',
             'elk.layered.layering.strategy':                'LONGEST_PATH',
@@ -181,9 +186,9 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
             node['width'] = w
             node['height'] = h
         else:
-            state_type = body.get('state_type', 'OR_STATE')
-            direction = 'RIGHT' if state_type == 'AND_STATE' else 'DOWN'
-            node['layoutOptions'] = _compound_options(direction, body)
+            state_type     = body.get('state_type', 'OR_STATE')
+            node_dir       = 'RIGHT' if state_type == 'AND_STATE' else direction
+            node['layoutOptions'] = _compound_options(node_dir, body)
 
             child_sinks = _find_sink_states(children_dict, transitions, full_path)
             init_name   = next((n for n in children_dict if children_dict[n].get('default')), None)
@@ -226,7 +231,7 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
 
     root_opts = {
         'elk.algorithm':                                'layered',
-        'elk.direction':                                'DOWN',
+        'elk.direction':                                direction,
         'elk.hierarchyHandling':                        'INCLUDE_CHILDREN',
         'elk.spacing.nodeNode':                         '50',
         'elk.layered.spacing.nodeNodeBetweenLayers':    '60',

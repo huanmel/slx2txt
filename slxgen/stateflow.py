@@ -760,14 +760,14 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: str = None,
     if states_dict:
         if _ELK_AVAILABLE:
             try:
-                _elk_opts = dict(elk_options) if elk_options else {}
-                _max_lw = _elk_opts.pop('__max_label_width__', None)
+                _elk_opts  = dict(elk_options) if elk_options else {}
+                _max_lw    = _elk_opts.pop('__max_label_width__',    None)
                 _label_sub = _elk_opts.pop('__label_substitution__', None)
+                _dir       = _elk_opts.pop('__direction__',           None)
                 _elk_kw: dict = {}
-                if _max_lw is not None:
-                    _elk_kw['max_label_width'] = int(_max_lw)
-                if _label_sub is not None:
-                    _elk_kw['label_substitution'] = bool(_label_sub)
+                if _max_lw    is not None: _elk_kw['max_label_width']    = int(_max_lw)
+                if _label_sub is not None: _elk_kw['label_substitution'] = bool(_label_sub)
+                if _dir       is not None: _elk_kw['direction']          = str(_dir)
                 elk_json = sf_to_elk_json({'states': states_dict, 'transitions': transitions},
                                           layout_options=_elk_opts, **_elk_kw)
                 elk_result = elk_layout(elk_json)
