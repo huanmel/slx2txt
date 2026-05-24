@@ -281,7 +281,8 @@ def _oclock_from_point(px: float, py: float,
 
 
 def elk_to_stateflow_layout(elk_result: dict,
-                             chart_dict: 'dict | None' = None) -> Tuple[dict, dict, dict]:
+                             chart_dict: 'dict | None' = None,
+                             fault_bus_junctions: bool = False) -> Tuple[dict, dict, dict]:
     """Extract Stateflow layout from ELK result.
 
     chart_dict: the original chart dict (with 'states' key) used to resolve explicit
@@ -375,9 +376,12 @@ def elk_to_stateflow_layout(elk_result: dict,
 
     _place_fault_states_right(positions, state_roles)
 
-    fault_junctions = _compute_fault_junctions(
-        positions, state_roles,
-        chart_dict.get('transitions', []) if chart_dict else [])
+    fault_junctions = (
+        _compute_fault_junctions(
+            positions, state_roles,
+            chart_dict.get('transitions', []) if chart_dict else [])
+        if fault_bus_junctions else {}
+    )
 
     return positions, edge_routing, fault_junctions
 

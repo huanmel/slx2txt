@@ -766,6 +766,7 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: str = None,
                 _max_lw    = _elk_opts.pop('__max_label_width__',    None)
                 _label_sub = _elk_opts.pop('__label_substitution__', None)
                 _dir       = _elk_opts.pop('__direction__',           None)
+                _fbus      = _elk_opts.pop('__fault_bus_junctions__', None)
                 _elk_kw: dict = {}
                 if _max_lw    is not None: _elk_kw['max_label_width']    = int(_max_lw)
                 if _label_sub is not None: _elk_kw['label_substitution'] = bool(_label_sub)
@@ -773,8 +774,9 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: str = None,
                 elk_json = sf_to_elk_json({'states': states_dict, 'transitions': transitions},
                                           layout_options=_elk_opts, **_elk_kw)
                 elk_result = elk_layout(elk_json)
+                _fbus_kw = {'fault_bus_junctions': _fbus.lower() in ('1', 'true', 'yes')} if _fbus is not None else {}
                 positions, edge_routing, fault_junctions = elk_to_stateflow_layout(
-                    elk_result, {'states': states_dict, 'transitions': transitions})
+                    elk_result, {'states': states_dict, 'transitions': transitions}, **_fbus_kw)
             except Exception:
                 positions = _compute_sf_layout(states_dict, transitions=transitions)
         else:
