@@ -536,8 +536,6 @@ python work/test_elk_variants.py --log results.csv         # cross-model CSV
 - **Inner transitions**: `inner: true` on a transition stays within the source state's
   active child without exiting the source. Not in YAML schema or codegen.
 - **Named events / messages**: Stateflow events (`Stateflow.Event`); currently no YAML key.
-- **`du:` transitions**: during-action triggered transitions; currently `du:` is state-body
-  only; transition `du:` field is not in the schema.
 
 ### SIR normalization layer (`slxgen/stateflow_sir.py`)
 
