@@ -474,26 +474,35 @@ chart_dict  →  sf_to_elk_json()  →  elk_layout()  →  elk_to_stateflow_layo
 | Compound top padding | dynamic | `_compound_header_h(body)` computes actual header height from en/du/ex action line count — fixed ON_INIT overlapping parent header |
 | `_ELK_LABEL_MID_X = 10` | LCA-relative | MidPoint x override for labeled transitions — labels start at left margin and extend rightward instead of overflowing from arc center |
 
-### Override mechanism
+### Override mechanism (`elk_options=` to `sf_yaml_to_matlab()`)
 
-Pass `elk_options=` to `stateflow_dict_to_matlab()`. Special `__` keys are intercepted:
+All `__` keys are intercepted before passing remaining options to ELK:
 
-- `__max_label_width__`: override `_LABEL_MAX_WIDTH_PX` for this call
-- `__label_substitution__`: override the default `True`
+| Key | Default | Description |
+| --- | --- | --- |
+| `__direction__` | `DOWN` | Layout axis for normal states |
+| `__max_label_width__` | `150` | Pixel cap for transition label width |
+| `__label_substitution__` | `true` | Replace long labels with short IDs for ELK sizing |
+| `__bare_transitions__` | `false` | Skip all transition geometry — Stateflow auto-routes |
+| `__sink_placement__` | `none` | Post-ELK sink repositioning: `right`, `left`, `top`, `bottom`, `auto`, `none` |
+| `__auto_sink__` | off | Integer N: auto-promote pure-sink states with ≥ N incoming transitions |
+| `__sink_bus_junctions__` | `false` | Route sink transitions through a vertical junction bus spine |
+| `__orthogonal_junctions__` | `false` | Strict H/V spine (requires `__sink_bus_junctions__`) |
+| `__subchart_leaf_size__` | off | `WxH` e.g. `200x150` — override subchart footprint at parent level |
 
 ### Known remaining layout issues
 
-1. **Multiple transitions to the same destination at the same y**: e.g. two fault
+1. **Multiple transitions to the same destination at the same y**: two fault
    transitions from ON→FAULT_ACTIVE both land at `MidPoint=[10, 494]`. Labels overlap.
    Root cause: topology (same src/dst tier), not layout. Fix: semantic role classification
-   (route fault transitions laterally, not downward — proposals.md Step 3).
+   to route fault transitions laterally, not downward.
 
 2. **Long labels overflow right edge**: 75-char labels (≈525px) exceed container width
    (≈430px). Labels start at x=10 so only ~95px overflows. Acceptable for now.
 
-3. **Fault state placement**: `_find_sink_states()` pushes states with FAULT/ERROR in
-   name to `layerConstraint: LAST`. This works for the primary fault state but does not
-   separate fault transitions visually from the main chain.
+3. **Junction bus below-gateway edge case**: source states positioned below the gateway
+   junction produce an upward arc instead of a straight horizontal. Functional but not
+   perfectly orthogonal.
 
 ### Variant research script
 
@@ -509,26 +518,51 @@ python work/test_elk_variants.py --log results.csv         # cross-model CSV
 
 ## Known gaps / future work
 
-- **MATLAB Function blocks**: listed in machine.xml but not parsed (different
-  internal structure, not standard Stateflow states/transitions)
-- **ReferencedSubsystem charts**: charts inside cross-file referenced subsystems
-  (e.g. `ClimCtl_sub`) are found when that SLX is processed by `process_model_tree`.
-  They do NOT appear in the parent model's sf.yaml export.
+### Layout — next improvements (medium priority)
+
+- **Overlapping transition labels**: two transitions to the same destination land at
+  the same `MidPoint.y`. Cause: topology, not ELK. Fix: detect fan-in transitions at
+  codegen time and stagger their `MidPoint` vertically (e.g. ±20 px per transition index).
+- **Back-edge arcs cut through states**: ELK routes them internally; Stateflow convention
+  is to route around the outside via a junction. Fix requires generating explicit junction
+  nodes for detected back-edges (high effort).
+- **State box sizing for multi-line action text**: character-count estimate can produce
+  slightly undersized boxes. Manual `width`/`height` YAML overrides are the workaround.
+  A more accurate heuristic could count wrapped lines using a fixed char-per-line estimate.
+
+### YAML spec coverage — missing features
+
+- **Junctions**: decision nodes for shared transition routing; not yet emittable from YAML.
+- **Inner transitions**: `inner: true` on a transition stays within the source state's
+  active child without exiting the source. Not in YAML schema or codegen.
+- **Named events / messages**: Stateflow events (`Stateflow.Event`); currently no YAML key.
+- **`du:` transitions**: during-action triggered transitions; currently `du:` is state-body
+  only; transition `du:` field is not in the schema.
+
+### SIR normalization layer (`slxgen/stateflow_sir.py`)
+
+Phases 1–2 complete:
+
+- `yaml_to_sir()` normalises YAML into a flat typed graph
+- `sir_validate()` runs structural checks (7 rules)
+- `sir_to_chart_dict()` converts back so existing codegen is unchanged
+
+Next phases:
+
+- **Phase 3**: Mermaid diagram output from `SIRModel` (~50 LOC, proves multi-target output)
+- **Phase 4**: YAML auto-normalisation (sort states, canonical key order)
+- **Phase 5**: Predicate/timer extraction as SIR transforms; `sir_to_chart_dict()` handles
+  the translation — `stateflow_dict_to_matlab()` stays frozen
+
+### SLX parsing — deferred
+
+- **MATLAB Function blocks**: listed in `machine.xml` but not parsed (different internal
+  structure, not standard Stateflow states/transitions).
+- **ReferencedSubsystem charts**: charts inside cross-file referenced subsystems are found
+  when that SLX is processed by `process_model_tree`; they do NOT appear in the parent
+  model's `sf.yaml` export.
 - **`_arch.md` output**: Mermaid diagram generation exists but is disabled in
   `process_model.py` for current workflow (only report.txt + sf.yaml needed).
-- **ELK role classification (proposals.md Steps 1-3)**: classify states as
-  init/main/fault/auxiliary; detect dominant path; apply `layerConstraint: FIRST`
-  for default states; set edge `priority` for dominant-path transitions. Would fix
-  the stacked-label problem and improve fault-transition routing.
-- **ELK template patterns**: detect common FSM topologies (linear chain, hub-and-spoke,
-  fault-tolerant chain) and apply pre-tuned layout constraints per pattern.
-- **SIR normalization layer** (`docs/sir_notes.md`, `slxgen/stateflow_sir.py`): Phases
-  1–2 complete. `yaml_to_sir()` normalizes YAML into a flat typed graph; `sir_validate()`
-  runs 7 structural checks; `sir_to_chart_dict()` converts back to nested dict so the
-  existing codegen is unchanged. SIR is now the authoritative source for generation.
-  Next: Phase 3 — Mermaid diagram output from `SIRModel` (~50 LOC, proves multi-target).
-  Phase 4: YAML auto-normalization. Phase 5: predicate/timer extraction as SIR transforms;
-  `sir_to_chart_dict()` handles the translation — `stateflow_dict_to_matlab()` stays frozen.
 
 ---
 

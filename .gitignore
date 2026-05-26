@@ -222,3 +222,20 @@ node_modules/
 package-lock.json
 
 work/
+
+# MATLAB build artifacts
+slprj/
+
+# Generated MATLAB model output (build artifacts, not source)
+example/model_gen/generated/*.slx
+example/model_gen/generated/*.png
+example/model_gen/generated/*_charts/
+example/model_gen/generated/*_compact.m
+example/model_gen/generated/*_ortho.m
+example/model_gen/generated/*_bare.m
+example/model_gen/generated/*_elk_pure.m
+example/model_gen/generated/*_sink.m
+example/model_gen/DevCtrl_StMach_ortho_ref.slx
+example/model_gen/DevCtrl_StMach_ortho_ref/
+example/model_gen/statate_ref_1.png
+matlab/

@@ -21,8 +21,8 @@
 name: DevCtrl_StMach
 
 inputs:
-- name: devStatus # datatype inherited from Simulink
-- name: startupTout # datatype inherited from Simulink
+- name: devStatus # datatype not assigned, would be inherited from Simulink
+- name: startupTout # datatype assigned explicitly
   type: uint8
 - name: faultTout
   type: uint8
@@ -55,6 +55,7 @@ states:
       STARTUP:
         default: true
         subchart: true
+        history: true  # resume last startup phase when re-entering from STANDBY
         en: |-
           mode_cmd=DevMode_e.STARTUP;
           send_data=true;
@@ -62,7 +63,7 @@ states:
           hasFault=false;
         states:
           FAULT_ACTIVE:
-            role: fault
+            role: fault  # set state role to 'fault' to automatically propagate fault status to parent states
             en: hasFault=true;
           INIT:
             default: true
@@ -70,9 +71,21 @@ states:
           CONNECTING:
             en: state=DevState_e.CONNECTING;
           READY:
+            type: AND              # parallel decomposition — two regions run simultaneously
             en: state=DevState_e.READY;
+            states:
+              LINK_MON:            # region 1: tracks link quality
+                states:
+                  LINK_HEALTHY:
+                    default: true
+                  LINK_DEGRADED: {}
+              DATA_CTRL:           # region 2: data rate management
+                states:
+                  FULL_RATE:
+                    default: true
+                  REDUCED: {}
       ERROR:
-        role: fault
+        role: fault  # set state role to 'fault'
         en: state=DevState_e.ERROR;
       STANDBY:
         subchart: true
@@ -82,7 +95,7 @@ states:
           hasFault=false;
         states:
           FAULT_ACTIVE:
-            role: fault
+            role: fault  # set state role to 'fault'
             en: hasFault=true;
           STANDBY_INIT:
             default: true
@@ -133,6 +146,28 @@ transitions:
   condition: count(devErr)>faultTout
   action: dev_fault=DevFault_e.FAULT_DEV_ERR
   order: '2'
+
+# --- READY AND regions ---
+
+- from: ACTIVE.STARTUP.READY.LINK_MON.LINK_HEALTHY
+  to: ACTIVE.STARTUP.READY.LINK_MON.LINK_DEGRADED
+  condition: ~linkOk
+  order: '1'
+
+- from: ACTIVE.STARTUP.READY.LINK_MON.LINK_DEGRADED
+  to: ACTIVE.STARTUP.READY.LINK_MON.LINK_HEALTHY
+  condition: linkOk
+  order: '1'
+
+- from: ACTIVE.STARTUP.READY.DATA_CTRL.FULL_RATE
+  to: ACTIVE.STARTUP.READY.DATA_CTRL.REDUCED
+  condition: devErr
+  order: '1'
+
+- from: ACTIVE.STARTUP.READY.DATA_CTRL.REDUCED
+  to: ACTIVE.STARTUP.READY.DATA_CTRL.FULL_RATE
+  condition: ~devErr
+  order: '1'
 
 # --- STANDBY substates ---
 

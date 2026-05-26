@@ -34,7 +34,8 @@ class SIRState:
     initial: bool        # True = default substate within its parent
     decomp: str          # 'OR' | 'AND'
     subchart: bool
-    role: str | None     # layout hint: 'fault' | 'init' | 'main' | 'auxiliary'
+    history: bool        # True = place a HISTORY junction inside this compound state
+    role: str | None     # layout hint: 'sink' (canonical) | 'fault'/'error' (aliases) | 'init' | 'normal'
     en: str | None
     du: str | None
     ex: str | None
@@ -97,6 +98,7 @@ def yaml_to_sir(chart_dict: dict) -> SIRModel:
                 initial=bool(state_data.get('default', False)),
                 decomp='AND' if state_data.get('type') == 'AND' else 'OR',
                 subchart=bool(state_data.get('subchart', False)),
+                history=bool(state_data.get('history', False)),
                 role=state_data.get('role'),
                 en=state_data.get('en'),
                 du=state_data.get('du'),
@@ -197,7 +199,15 @@ def sir_validate(sir: SIRModel) -> list[str]:
     for s in sir.states:
         children_by_parent[s.parent].append(s)
 
+    state_by_id = {s.id: s for s in sir.states}
+
     for parent_id, children in children_by_parent.items():
+        # AND (parallel) states: all regions are active simultaneously — no default applies.
+        parent_is_and = parent_id is not None and state_by_id.get(parent_id, None) is not None \
+                        and state_by_id[parent_id].decomp == 'AND'
+        if parent_is_and:
+            continue
+
         defaults = [c for c in children if c.initial]
         label = f"'{parent_id}'" if parent_id else "root"
 
@@ -212,6 +222,29 @@ def sir_validate(sir: SIRModel) -> list[str]:
             issues.append(
                 f"WARNING: {label} has {len(children)} children but none is marked "
                 f"default (first child '{children[0].name}' will be used)"
+            )
+
+    # --- History junction checks ---
+    for s in sir.states:
+        if not s.history:
+            continue
+        if s.decomp == 'AND':
+            issues.append(
+                f"WARNING: state '{s.id}' has history=true but is an AND (parallel) "
+                f"state — history junctions are not meaningful in parallel decomposition"
+            )
+        if not children_by_parent.get(s.id):
+            issues.append(
+                f"WARNING: state '{s.id}' has history=true but has no children "
+                f"— history junction has no effect on a leaf state"
+            )
+
+    # --- AND + subchart combination check ---
+    for s in sir.states:
+        if s.decomp == 'AND' and s.subchart:
+            issues.append(
+                f"ERROR: state '{s.id}' has both type=AND and subchart=true — "
+                f"Stateflow does not allow subchart on parallel (AND) states"
             )
 
     # --- Variable initialization checks ---
@@ -267,7 +300,7 @@ def sir_validate(sir: SIRModel) -> list[str]:
         # Single-entry-path states are exempt: path-dependent assignment is unambiguous.
         # Pattern A (->fault role) is exempt: fault states intentionally latch fault
         # codes via transition action before the fault state resets other outputs.
-        if target.role != 'fault':
+        if target.role not in {'sink', 'fault', 'error'}:
             output_names = {v.name for v in sir.variables if v.scope == 'output'}
             all_incoming = incoming[t.target]
             if len(all_incoming) > 1:
@@ -337,6 +370,8 @@ def sir_to_chart_dict(sir: SIRModel) -> dict:
             node['type'] = 'AND'
         if s.subchart:
             node['subchart'] = True
+        if s.history:
+            node['history'] = True
         if s.role is not None:
             node['role'] = s.role
         if s.en is not None:

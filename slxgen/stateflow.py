@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Dict, List, Any
 
 try:
-    from slxgen.elk_layout import sf_to_elk_json, elk_layout, elk_to_stateflow_layout
+    from slxgen.elk_layout import (sf_to_elk_json, elk_layout, elk_to_stateflow_layout,  # noqa: F401
+                                    elk_layout_bottomup)
     _ELK_AVAILABLE = True
 except ImportError:
     _ELK_AVAILABLE = False
@@ -409,13 +410,19 @@ def _direct_child_name(path: str, prefix: str) -> str:
     return rest.split('.')[0] if rest else ''
 
 
-def _find_sink_states(states_dict: Dict, transitions: list, path_prefix: str) -> set:
-    """Return names of direct children that are fault/error sinks.
+_SINK_KEYWORDS: tuple = ('FAULT', 'ERROR')
 
-    A sink is a child with no outgoing transitions to siblings. Only named states
-    containing 'FAULT' or 'ERROR' qualify, and only when at least 2 non-sink
-    siblings exist (avoids false-positive sidebars at the chart root level).
+
+def _find_sink_states(states_dict: Dict, transitions: list, path_prefix: str) -> set:
+    """Return names of direct children that qualify as ELK LAST-layer sinks.
+
+    A sink has no outgoing transitions to siblings AND meets at least one of:
+      - name contains a sink keyword ('FAULT', 'ERROR')
+      - explicit role: sink/fault/error annotation in the YAML body
+
+    Requires at least 2 non-sink siblings to avoid false-positive sidebars at root.
     """
+    from slxgen.elk_layout import _SINK_ROLE_ALIASES  # noqa: PLC0415
     child_names = set(states_dict.keys())
     froms: set = set()
     for t in transitions:
@@ -424,11 +431,52 @@ def _find_sink_states(states_dict: Dict, transitions: list, path_prefix: str) ->
         if src_top in child_names and dst_top in child_names and src_top != dst_top:
             froms.add(src_top)
     pure_sinks = child_names - froms
-    fault_sinks = {s for s in pure_sinks if 'FAULT' in s.upper() or 'ERROR' in s.upper()}
-    # Require at least 2 normal children to avoid unwanted sidebars at root level
-    if len(child_names) - len(fault_sinks) < 2:
+    sink_children = {
+        s for s in pure_sinks
+        if any(kw in s.upper() for kw in _SINK_KEYWORDS)
+        or states_dict[s].get('role', '').lower() in _SINK_ROLE_ALIASES
+    }
+    if len(child_names) - len(sink_children) < 2:
         return set()
-    return fault_sinks
+    return sink_children
+
+
+def _compute_auto_sinks(states_dict: Dict, transitions: list,
+                         min_incoming: int) -> 'frozenset[str]':
+    """Topological sink detection: return dotted paths of states that are pure sinks
+    (no outgoing transitions to siblings) with at least min_incoming from siblings.
+
+    Used when the __auto_sink__ elk_option is set. The result is passed to
+    sf_to_elk_json() and elk_to_stateflow_layout() as auto_sinks.
+    """
+    all_paths: set = set()
+
+    def _walk(d: dict, prefix: str) -> None:
+        for name, body in d.items():
+            path = f'{prefix}.{name}' if prefix else name
+            all_paths.add(path)
+            _walk(body.get('states', {}), path)
+
+    _walk(states_dict, '')
+
+    incoming: Dict[str, int] = {p: 0 for p in all_paths}
+    outgoing: Dict[str, int] = {p: 0 for p in all_paths}
+
+    for tr in transitions:
+        src = tr.get('from', '')
+        dst = tr.get('to', '')
+        if not src or src not in all_paths or dst not in all_paths:
+            continue
+        src_parent = src.rsplit('.', 1)[0] if '.' in src else ''
+        dst_parent = dst.rsplit('.', 1)[0] if '.' in dst else ''
+        if src_parent == dst_parent:
+            outgoing[src] = outgoing.get(src, 0) + 1
+            incoming[dst] = incoming.get(dst, 0) + 1
+
+    return frozenset(
+        p for p in all_paths
+        if outgoing.get(p, 0) == 0 and incoming.get(p, 0) >= min_incoming
+    )
 
 
 def _sf_state_size(state_body: Dict, transitions=None, path_prefix: str = '') -> tuple:
@@ -560,7 +608,7 @@ def _rebuild_state_label(name: str, actions: Dict[str, str]) -> str:
         code = actions.get(kw, '').strip()
         if code:
             parts.append(f'{kw}:\n{code}')
-    _LAYOUT_KEYS = {'role', 'default', 'state_type', 'subchart'}
+    _LAYOUT_KEYS = {'role', 'default', 'state_type', 'subchart', 'history'}
     for kw, code in actions.items():
         if kw not in ('en', 'du', 'ex') and kw not in _LAYOUT_KEYS and isinstance(code, str) and code.strip():
             parts.append(f'{kw}:\n{code.strip()}')
@@ -636,8 +684,14 @@ def _emit_sf_default_transition(
     counter: List[int],
     lines: List[str],
     is_auto: bool = False,
+    src_pos: 'tuple | None' = None,
 ) -> None:
-    """Emit a Stateflow default transition (no source) pointing to dst_var."""
+    """Emit a Stateflow default transition (no source) pointing to dst_var.
+
+    src_pos: (rel_x, rel_y, w, h) of the destination state in the parent's
+    coordinate space.  When provided, the source dot is placed explicitly so it
+    stays inside the parent box (y ≥ 2) rather than floating above it.
+    """
     counter[0] += 1
     tv = f't{counter[0]}'
     if is_auto:
@@ -645,8 +699,16 @@ def _emit_sf_default_transition(
     lines.append(f"{tv} = Stateflow.Transition({parent_var});")
     lines.append(f"{tv}.Destination = {dst_var};")
     lines.append(f"{tv}.DestinationOClock = 0;")
-    lines.append(f"{tv}.SourceEndPoint = {tv}.DestinationEndpoint + [0 -30];")
-    lines.append(f"{tv}.MidPoint = {tv}.DestinationEndpoint + [0 -15];")
+    if src_pos is not None:
+        rx, ry, rw, _ = src_pos
+        dot_x = rx + rw // 2
+        dot_y = max(ry - 20, 2)        # 20 px above state top, always inside parent
+        mid_y = (dot_y + ry) // 2
+        lines.append(f"{tv}.SourceEndPoint = [{dot_x} {dot_y}];")
+        lines.append(f"{tv}.MidPoint = [{dot_x} {mid_y}];")
+    else:
+        lines.append(f"{tv}.SourceEndPoint = {tv}.DestinationEndpoint + [0 -30];")
+        lines.append(f"{tv}.MidPoint = {tv}.DestinationEndpoint + [0 -15];")
 
 
 def _sf_states_to_matlab_lines(
@@ -657,17 +719,29 @@ def _sf_states_to_matlab_lines(
     path_to_var: Dict[str, str],
     lines: List[str],
     positions: Dict[str, tuple],
+    _parent_is_and: bool = False,
+    _subchart_path: str = '',
 ) -> None:
-    """Recursively emit MATLAB lines that create Stateflow states."""
+    """Recursively emit MATLAB lines that create Stateflow states.
+
+    _parent_is_and: when True, skip default-transition emission at this level.
+    AND states have all regions simultaneously active — no single entry arrow.
+
+    _subchart_path: path of the nearest enclosing subchart (IsSubchart=true).
+    Inside a subchart all Position values must be subchart-absolute — i.e. relative
+    to the subchart's own origin — regardless of how deep the state is nested.
+    At chart level (no enclosing subchart) Position is parent-relative as usual.
+    """
     default_child_name = None
     has_explicit_default = False
-    for name, body in states_dict.items():
-        if body.get('default'):
-            default_child_name = name
-            has_explicit_default = True
-            break
-    if default_child_name is None and states_dict:
-        default_child_name = next(iter(states_dict))
+    if not _parent_is_and:
+        for name, body in states_dict.items():
+            if body.get('default'):
+                default_child_name = name
+                has_explicit_default = True
+                break
+        if default_child_name is None and states_dict:
+            default_child_name = next(iter(states_dict))
 
     for state_name, state_body in states_dict.items():
         counter[0] += 1
@@ -676,7 +750,7 @@ def _sf_states_to_matlab_lines(
         path_to_var[full_path] = var
 
         actions = {k: v for k, v in state_body.items()
-                   if k not in ('states', 'default', 'type', 'subchart') and isinstance(v, str)}
+                   if k not in ('states', 'default', 'type', 'subchart', 'history') and isinstance(v, str)}
         label = _rebuild_state_label(state_name, actions)
 
         lines.append(f"{var} = Stateflow.State({parent_var});")
@@ -684,9 +758,11 @@ def _sf_states_to_matlab_lines(
         lines.append(f"{var}.LabelString = {_matlab_str_literal(label)};")
         if full_path in positions:
             x, y, w, h = positions[full_path]
-            # Stateflow Position is in the parent's LOCAL coordinate space.
-            # Subtract parent's global top-left so children always start at small offsets.
-            if path_prefix and path_prefix in positions:
+            # Inside a subchart all Position values are subchart-absolute (relative to
+            # the subchart's origin).  At chart level they are parent-relative.
+            if _subchart_path and _subchart_path in positions:
+                px, py = positions[_subchart_path][0], positions[_subchart_path][1]
+            elif path_prefix and path_prefix in positions:
                 px, py = positions[path_prefix][0], positions[path_prefix][1]
             else:
                 px, py = 0, 0
@@ -699,14 +775,51 @@ def _sf_states_to_matlab_lines(
             lines.append(f"{var}.Decomposition = 'PARALLEL_AND';")
 
         if state_name == default_child_name:
-            _emit_sf_default_transition(
-                var, parent_var, counter, lines,
-                is_auto=not has_explicit_default,
-            )
+            _src_pos = None
+            if full_path in positions:
+                _x, _y, _w, _h = positions[full_path]
+                if _subchart_path and _subchart_path in positions:
+                    _px, _py = positions[_subchart_path][:2]
+                elif path_prefix and path_prefix in positions:
+                    _px, _py = positions[path_prefix][:2]
+                else:
+                    _px, _py = 0, 0
+                _src_pos = (_x - _px, _y - _py, _w, _h)
+            _emit_sf_default_transition(var, parent_var, counter, lines,
+                                        is_auto=not has_explicit_default,
+                                        src_pos=_src_pos)
 
         children = state_body.get('states', {})
         if children:
-            _sf_states_to_matlab_lines(children, var, full_path, counter, path_to_var, lines, positions)
+            if state_body.get('history'):
+                # History junction floats freely inside the state — no transitions connect to it.
+                # Stateflow's engine uses its presence to restore the last active substate on re-entry.
+                counter[0] += 1
+                hjv = f'j{counter[0]}'
+                # Use the actual content right-edge rather than the display width, which may
+                # differ when __subchart_leaf_size__ compresses the parent-level footprint.
+                _sc_ox = positions.get(full_path, (0, 0, 0, 0))[0]
+                _sc_pfx = full_path + '.'
+                _content_right = max(
+                    (pos[0] - _sc_ox + pos[2]
+                     for k, pos in positions.items() if k.startswith(_sc_pfx)),
+                    default=0,
+                )
+                _state_w = _content_right if _content_right > 0 else positions.get(full_path, (0, 0, 0, 0))[2]
+                _hjc_x = (_state_w - _SF_PADDING - 10) if _state_w > 60 else (_SF_PADDING + 10)
+                _hjc_y = _SF_HEADER_H + _SF_PADDING + 10
+                lines += [
+                    f"{hjv} = Stateflow.Junction({var});",
+                    f"{hjv}.Type = 'HISTORY';",
+                    f"{hjv}.Position.Center = [{_hjc_x} {_hjc_y}];",
+                    f"{hjv}.Position.Radius = 10;",
+                ]
+            # If this state is a subchart it becomes the coordinate origin for all descendants.
+            new_subchart_path = full_path if state_body.get('subchart') else _subchart_path
+            _sf_states_to_matlab_lines(children, var, full_path, counter, path_to_var,
+                                       lines, positions,
+                                       _parent_is_and=(state_body.get('type') == 'AND'),
+                                       _subchart_path=new_subchart_path)
 
 
 def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
@@ -737,6 +850,8 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
     lines.append("m = rt.find('-isa', 'Stateflow.Machine', 'Name', model_name);")
     lines.append("ch = m.find('-isa', 'Stateflow.Chart');")
     lines.append(f"ch.Name = '{_escape_matlab_str(chart_name)}';")
+    action_lang = chart_dict.get('language', 'MATLAB').upper()
+    lines.append(f"ch.ActionLanguage = '{_escape_matlab_str(action_lang)}';")
 
     inputs = chart_dict.get('inputs', [])
     if inputs:
@@ -775,21 +890,21 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
             lines.append(f"{v}.DataType = '{_escape_matlab_str(d['type'])}';")
 
     states_dict = chart_dict.get('states', {})
-    transitions = chart_dict.get('transitions', [])
-    # Sort by (from-path, order) so transitions from the same source are emitted
-    # in ascending execution-order. Stateflow auto-assigns order by creation
-    # sequence, so this prevents renumbering conflicts when we later set
-    # ExecutionOrder explicitly.
-    transitions = sorted(
-        transitions,
-        key=lambda t: (t.get('from', ''), int(t.get('order', '0')))
+    # Preserve original YAML order for ELK (edge model-order affects LINEAR_SEGMENTS placement).
+    # Sort by (from-path, order) only for MATLAB emission so Stateflow assigns ExecutionOrder
+    # in the correct sequence.  orig_idx is the index used for EDGE||…||{idx} IDs in ELK.
+    _transitions_raw = list(enumerate(chart_dict.get('transitions', [])))  # [(orig_idx, tr), ...]
+    _transitions_emit = sorted(
+        _transitions_raw,
+        key=lambda it: (it[1].get('from', ''), int(it[1].get('order', '0')))
     )
+    transitions = [t for _, t in _transitions_raw]   # original order — for ELK
 
     counter: List[int] = [0]
     path_to_var: Dict[str, str] = {}
     positions: Dict[str, tuple] = {}
     edge_routing: dict = {}
-    fault_junctions: dict = {}
+    sink_junctions: dict = {}
     orthogonal_junctions: bool = False
     bare_transitions: bool = False
     if states_dict:
@@ -799,24 +914,40 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
                 _max_lw    = _elk_opts.pop('__max_label_width__',    None)
                 _label_sub = _elk_opts.pop('__label_substitution__', None)
                 _dir       = _elk_opts.pop('__direction__',           None)
-                _fbus      = _elk_opts.pop('__fault_bus_junctions__', None)
+                _fbus      = _elk_opts.pop('__sink_bus_junctions__', None)
                 _ortho     = _elk_opts.pop('__orthogonal_junctions__', None)
                 _bare_tr   = _elk_opts.pop('__bare_transitions__',     None)
-                _no_fp     = _elk_opts.pop('__no_sink_placement__',    None)
+                _sp        = _elk_opts.pop('__sink_placement__',       None)
+                _no_fp     = _elk_opts.pop('__no_sink_placement__',    None)  # backward compat
+                _auto_sink = _elk_opts.pop('__auto_sink__',            None)
+                _sc_leaf   = _elk_opts.pop('__subchart_leaf_size__',   None)
                 _elk_kw: dict = {}
                 if _max_lw    is not None: _elk_kw['max_label_width']    = int(_max_lw)
                 if _label_sub is not None: _elk_kw['label_substitution'] = bool(_label_sub)
                 if _dir       is not None: _elk_kw['direction']          = str(_dir)
-                elk_json = sf_to_elk_json({'states': states_dict, 'transitions': transitions},
-                                          layout_options=_elk_opts, **_elk_kw)
-                elk_result = elk_layout(elk_json)
-                _fbus_kw = {'fault_bus_junctions': _fbus.lower() in ('1', 'true', 'yes')} if _fbus is not None else {}
-                _skip_kw: dict = {}
-                if _no_fp is not None:
-                    _skip_kw['skip_sink_placement'] = _no_fp.lower() in ('1', 'true', 'yes')
-                positions, edge_routing, fault_junctions = elk_to_stateflow_layout(
-                    elk_result, {'states': states_dict, 'transitions': transitions},
-                    **_skip_kw, **_fbus_kw)
+                auto_sinks: 'frozenset[str]' = frozenset()
+                if _auto_sink is not None:
+                    _min = int(_auto_sink) if _auto_sink.isdigit() else 2
+                    auto_sinks = _compute_auto_sinks(states_dict, transitions, _min)
+                sink_placement = 'none'
+                if _sp is not None:
+                    sink_placement = _sp.lower().strip()
+                elif _no_fp is not None and _no_fp.lower() in ('0', 'false', 'no'):
+                    sink_placement = 'right'  # __no_sink_placement__: false → right (backward compat)
+                _fbus_flag = _fbus is not None and _fbus.lower() in ('1', 'true', 'yes')
+                sc_leaf_size: 'tuple | None' = None
+                if _sc_leaf is not None:
+                    _m = re.match(r'(\d+)[x,\s]+(\d+)', _sc_leaf.strip(), re.I)
+                    if _m:
+                        sc_leaf_size = (int(_m.group(1)), int(_m.group(2)))
+                    elif _sc_leaf.strip().lower() in ('1', 'true', 'yes'):
+                        sc_leaf_size = (200, 150)   # compact standard size
+                positions, edge_routing, sink_junctions = elk_layout_bottomup(
+                    {'states': states_dict, 'transitions': transitions},
+                    layout_options=_elk_opts, auto_sinks=auto_sinks,
+                    sink_bus_junctions=_fbus_flag, sink_placement=sink_placement,
+                    subchart_leaf_size=sc_leaf_size,
+                    **_elk_kw)
                 orthogonal_junctions = _ortho is not None and _ortho.lower() in ('1', 'true', 'yes')
                 bare_transitions     = _bare_tr is not None and _bare_tr.lower() in ('1', 'true', 'yes')
             except Exception:
@@ -830,10 +961,10 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
     # --- Junction pre-pass: emit Stateflow.Junction nodes and spine connector transitions
     # Must run AFTER state emission (path_to_var is now populated) and BEFORE transition loop.
     junction_vars: Dict[str, Dict] = {}  # {fault_path: {'entries': [jv,...], 'gateway': jv}}
-    if fault_junctions:
+    if sink_junctions:
         lines.append('')
-        lines.append('%% Fault-bus junctions')
-    for fault_path, bus in fault_junctions.items():
+        lines.append('%% Sink-bus junctions')
+    for fault_path, bus in sink_junctions.items():
         parent_var = path_to_var.get(bus['parent'], 'ch')
         px, py     = positions.get(bus['parent'], (0, 0, 0, 0))[:2]
 
@@ -896,12 +1027,12 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
             if orthogonal_junctions:
                 lines.append(f"{tv}.SourceOClock = 3;")
 
-    if transitions:
+    if _transitions_emit:
         lines.append('')
         lines.append('%% Transitions')
     _stagger_used: dict = {}  # {(lca, mid_x_bucket): [mid_y]} — keyed by LCA + x-zone so
     # arcs in different visual lanes (normal left, fault right) don't stagger against each other
-    for tr_idx, tr in enumerate(transitions):
+    for tr_idx, tr in _transitions_emit:  # tr_idx == original YAML index (matches ELK edge IDs)
         counter[0] += 1
         tv = f't{counter[0]}'
         src_path = tr.get('from', '')
@@ -916,7 +1047,7 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
 
         # --- Fault-bus junction routing: reroute src → entry_junction instead of src → fault
         if dst_path in junction_vars and src_path in positions:
-            jbus   = fault_junctions[dst_path]
+            jbus   = sink_junctions[dst_path]
             jvinfo = junction_vars[dst_path]
             idx    = next((i for i, e in enumerate(jbus['entries']) if e['src'] == src_path), None)
             if idx is not None:

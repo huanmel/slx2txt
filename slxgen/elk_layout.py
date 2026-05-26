@@ -31,26 +31,36 @@ def _label_size(text: str, max_width: int = _LABEL_MAX_WIDTH_PX) -> Tuple[int, i
     return w, h
 
 
-_FAULT_KEYWORDS = ('FAULT', 'ERROR')
-_INIT_KEYWORDS  = ('INIT',)
+_SINK_KEYWORDS       = ('FAULT', 'ERROR')     # keyword-based auto-detection for sink role
+_SINK_ROLE_ALIASES: frozenset = frozenset({'sink', 'fault', 'error'})  # accepted role: values
+_INIT_KEYWORDS       = ('INIT',)
 
 
-def _state_role(name: str, body: dict) -> str:
-    """Infer layout role for a state from its name and body.
+def _state_role(name: str, body: dict,
+                path: str = '',
+                auto_sinks: 'frozenset[str]' = frozenset()) -> str:
+    """Infer layout role for a state from its name, body, and optional auto-sink set.
 
-    Roles:
-      'fault'  — error / exception states; placed in a dedicated right-column partition
-      'init'   — default (entry) state; ELK FIRST layer constraint
+    Canonical roles returned:
+      'sink'   — exception / collector states; right-column partition + LAST layer
+      'init'   — default (entry) state; FIRST layer constraint
       'normal' — everything else
 
-    Explicit override: set ``role: fault|init|normal`` in the state body (sf.yaml).
+    Explicit YAML ``role:`` accepts: 'sink' (canonical) or legacy aliases 'fault'/'error'.
+    Keyword detection on the state name ('FAULT', 'ERROR') is a fallback heuristic.
+    auto_sinks: set of fully-qualified dotted paths pre-computed by topological analysis;
+                any path in this set is treated as a sink regardless of name or annotation.
     """
     explicit = body.get('role', '').lower()
-    if explicit in ('fault', 'init', 'normal'):
+    if explicit in _SINK_ROLE_ALIASES:
+        return 'sink'
+    if explicit in ('init', 'normal'):
         return explicit
+    if path and path in auto_sinks:
+        return 'sink'
     upper = name.upper()
-    if any(kw in upper for kw in _FAULT_KEYWORDS):
-        return 'fault'
+    if any(kw in upper for kw in _SINK_KEYWORDS):
+        return 'sink'
     if body.get('default') or any(kw in upper for kw in _INIT_KEYWORDS):
         return 'init'
     return 'normal'
@@ -73,7 +83,9 @@ def _compound_header_h(body: dict) -> int:
 def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
                    max_label_width: int = _LABEL_MAX_WIDTH_PX,
                    label_substitution: bool = True,
-                   direction: str = 'DOWN') -> dict:
+                   direction: str = 'DOWN',
+                   auto_sinks: 'frozenset[str]' = frozenset(),
+                   fixed_sizes: 'dict | None' = None) -> dict:
     """Build an ELK graph JSON from a chart_dict (sf.yaml structure).
 
     chart_dict must have 'states' and optionally 'transitions' keys.
@@ -94,6 +106,7 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
     from slxgen.stateflow import _sf_state_size, _lca_path, _find_sink_states, _direct_child_name  # noqa: PLC0415
 
     overrides = layout_options or {}
+    _fixed = fixed_sizes or {}
     states_dict = chart_dict.get('states', {})
     transitions = chart_dict.get('transitions', [])
 
@@ -105,7 +118,8 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
         if not src:
             continue  # default transition — skip
         lca = _lca_path(src, dst)
-        edge_id = f'EDGE||{src}||{dst}||{order}'
+        # _orig_idx allows per-subchart runs to preserve original YAML transition indices
+        edge_id = f"EDGE||{src}||{dst}||{tr.get('_orig_idx', order)}"
         label_parts: List[str] = []
         if tr.get('trigger'):
             label_parts.append(tr['trigger'])
@@ -136,6 +150,7 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
             'elk.spacing.nodeNode':                         '20',
             'elk.layered.spacing.nodeNodeBetweenLayers':    '20',
             'elk.layered.layering.strategy':                'LONGEST_PATH',
+            'elk.layered.cycleBreaking.strategy':           'GREEDY_MODEL_ORDER',
             'elk.layered.nodePlacement.strategy':           'LINEAR_SEGMENTS',
             'elk.layered.nodePlacement.alignment':          'CENTER',
             'elk.edgeRouting':                              'SPLINES',
@@ -186,22 +201,33 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
         children_dict = body.get('states', {})
         node: dict = {'id': full_path}
 
+        if full_path in _fixed:
+            # Pre-computed fixed size from a per-subchart ELK run — treat as a leaf.
+            node['width'], node['height'] = _fixed[full_path]
+            return node
+
         if not children_dict:
             w, h = _sf_state_size(body)
             node['width'] = w
             node['height'] = h
         else:
             state_type     = body.get('state_type', 'OR_STATE')
-            node_dir       = 'RIGHT' if state_type == 'AND_STATE' else direction
+            is_and         = state_type == 'AND_STATE' or body.get('type') == 'AND'
+            node_dir       = 'RIGHT' if is_and else direction
             node['layoutOptions'] = _compound_options(node_dir, body)
 
             child_sinks = _find_sink_states(children_dict, transitions, full_path)
             init_name   = next((n for n in children_dict if children_dict[n].get('default')), None)
             dominant    = _find_dominant_path_edges(children_dict, full_path, child_sinks)
 
-            child_roles = {cname: _state_role(cname, cbody) for cname, cbody in children_dict.items()}
-            has_fault   = any(r == 'fault' for r in child_roles.values())
-            if has_fault:
+            child_roles = {
+                cname: _state_role(cname, cbody,
+                                   path=f'{full_path}.{cname}' if full_path else cname,
+                                   auto_sinks=auto_sinks)
+                for cname, cbody in children_dict.items()
+            }
+            has_sink = any(r == 'sink' for r in child_roles.values())
+            if has_sink:
                 node['layoutOptions']['elk.partitioning.activate'] = 'true'
 
             children_nodes = []
@@ -209,11 +235,11 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
                 child_node = build_node(cname, cbody, full_path)
                 lo = child_node.setdefault('layoutOptions', {})
                 role = child_roles[cname]
-                if role == 'fault':
+                if role == 'sink':
                     lo['elk.partitioning.partition'] = '1'
                     lo['elk.layered.layerConstraint'] = 'LAST'
                 else:
-                    if has_fault:
+                    if has_sink:
                         lo['elk.partitioning.partition'] = '0'
                     if cname in child_sinks:
                         lo['elk.layered.layerConstraint'] = 'LAST'
@@ -237,10 +263,11 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
     root_opts = {
         'elk.algorithm':                                'layered',
         'elk.direction':                                direction,
-        'elk.hierarchyHandling':                        'INCLUDE_CHILDREN',
+        'elk.hierarchyHandling':                        'SEPARATE_CHILDREN',
         'elk.spacing.nodeNode':                         '20',
         'elk.layered.spacing.nodeNodeBetweenLayers':    '20',
         'elk.layered.layering.strategy':                'LONGEST_PATH',
+        'elk.layered.cycleBreaking.strategy':           'GREEDY_MODEL_ORDER',
         'elk.layered.nodePlacement.strategy':           'LINEAR_SEGMENTS',
         'elk.layered.nodePlacement.alignment':          'CENTER',
         'elk.edgeRouting':                              'SPLINES',
@@ -297,13 +324,20 @@ def _point_to_oclock(px: float, py: float,
 
 def elk_to_stateflow_layout(elk_result: dict,
                              chart_dict: 'dict | None' = None,
-                             fault_bus_junctions: bool = False,
-                             skip_sink_placement: bool = True) -> Tuple[dict, dict, dict]:
+                             sink_bus_junctions: bool = False,
+                             sink_placement: str = 'none',
+                             auto_sinks: 'frozenset[str]' = frozenset()) -> Tuple[dict, dict, dict]:
     """Extract Stateflow layout from ELK result.
 
     chart_dict: the original chart dict (with 'states' key) used to resolve explicit
-                role: annotations.  When provided, explicit ``role: fault`` in the YAML
-                overrides keyword-based fault detection in _place_sink_states_right().
+                role: annotations.  When provided, explicit role annotations override
+                keyword-based sink detection in _place_sink_states().
+    sink_placement: where to reposition sink states after ELK runs.
+                    'none' (default) — no repositioning, use pure ELK output.
+                    'right'|'left'|'top'|'bottom' — move sinks to that side of normal children.
+                    'auto' — pick right/bottom based on normal-children aspect ratio.
+    auto_sinks: optional set of fully-qualified dotted paths to treat as sink states,
+                computed from topological analysis (see _compute_auto_sinks in stateflow.py).
 
     Returns:
       positions    — {dotted.path: (global_x, global_y, w, h)}
@@ -380,32 +414,49 @@ def elk_to_stateflow_layout(elk_result: dict,
         def _collect_roles(states: dict, prefix: str) -> None:
             for name, body in states.items():
                 path = f'{prefix}.{name}' if prefix else name
-                state_roles[path] = _state_role(name, body)
+                state_roles[path] = _state_role(name, body, path=path, auto_sinks=auto_sinks)
                 _collect_roles(body.get('states', {}), path)
         _collect_roles(chart_dict.get('states', {}), '')
 
-    if not skip_sink_placement:
-        _place_sink_states_right(positions, state_roles)
-        _recompute_sink_edge_routing(edge_routing, positions, state_roles)
+    if sink_placement != 'none':
+        _place_sink_states(positions, state_roles, sink_placement)
+        _recompute_sink_edge_routing(edge_routing, positions, state_roles, sink_placement)
 
-    fault_junctions = (
-        _compute_fault_junctions(
+    sink_junctions = (
+        _compute_sink_junctions(
             positions, state_roles,
             chart_dict.get('transitions', []) if chart_dict else [])
-        if fault_bus_junctions else {}
+        if sink_bus_junctions else {}
     )
 
-    return positions, edge_routing, fault_junctions
+    return positions, edge_routing, sink_junctions
+
+
+_SINK_PLACEMENT_OCLOCKS = {
+    'right':  (3.0, 9.0),   # src exits right, dst enters left
+    'left':   (9.0, 3.0),   # src exits left,  dst enters right
+    'bottom': (6.0, 12.0),  # src exits bottom, dst enters top
+    'top':    (12.0, 6.0),  # src exits top,    dst enters bottom
+}
 
 
 def _recompute_sink_edge_routing(edge_routing: dict, positions: dict,
-                                  state_roles: dict) -> None:
-    """Recompute edge routing for transitions into sink/fault states after repositioning.
+                                  state_roles: dict,
+                                  placement: str = 'right') -> None:
+    """Recompute edge routing for transitions into sink states after repositioning.
 
-    _place_sink_states_right() moves fault states to a right column *after* ELK runs,
-    making ELK's original MidPoint and OClock stale.  This replaces them with a direct
-    right→left horizontal route derived from the final (post-move) positions.
+    _place_sink_states() moves sink states *after* ELK runs, making ELK's original
+    MidPoint and OClock stale.  This replaces them with a straight route derived from
+    the final (post-move) positions and the chosen placement direction.
     """
+    # Resolve 'auto' to a concrete direction using the same heuristic as _place_sink_states.
+    # We use the first sink state's position relative to its siblings as a proxy.
+    eff_placement = placement
+    if placement == 'auto':
+        eff_placement = 'right'  # fallback; auto was already resolved in _place_sink_states
+
+    src_oc, dst_oc = _SINK_PLACEMENT_OCLOCKS.get(eff_placement, (3.0, 9.0))
+
     def _lca_of(a: str, b: str) -> str:
         a_parts = a.split('.') if a else []
         b_parts = b.split('.') if b else []
@@ -422,36 +473,44 @@ def _recompute_sink_edge_routing(edge_routing: dict, positions: dict,
         if len(parts) < 3:
             continue
         src_path, dst_path = parts[1], parts[2]
-        if state_roles.get(dst_path) != 'fault':
+        if state_roles.get(dst_path) != 'sink':
             continue
         if src_path not in positions or dst_path not in positions:
             continue
         sx, sy, sw, sh = positions[src_path]
-        dx, dy, _, dh = positions[dst_path]
+        dx, dy, dw, dh = positions[dst_path]
         lca = _lca_of(src_path, dst_path)
         lca_x, lca_y = positions.get(lca, (0, 0, 0, 0))[:2] if lca else (0, 0)
 
-        er['src_oclock'] = 3.0
-        er['dst_oclock'] = 9.0
-        er['mid_x'] = int((sx + sw + dx) // 2 - lca_x)
-        er['mid_y'] = int(((sy + sh // 2) + (dy + dh // 2)) // 2 - lca_y)
+        er['src_oclock'] = src_oc
+        er['dst_oclock'] = dst_oc
+        if eff_placement in ('right', 'left'):
+            er['mid_x'] = int((sx + sw + dx) // 2 - lca_x)
+            er['mid_y'] = int(((sy + sh // 2) + (dy + dh // 2)) // 2 - lca_y)
+        else:  # top / bottom
+            er['mid_x'] = int(((sx + sw // 2) + (dx + dw // 2)) // 2 - lca_x)
+            er['mid_y'] = int((sy + sh + dy) // 2 - lca_y)
 
 
-def _place_sink_states_right(positions: dict,
-                               state_roles: 'Dict[str, str] | None' = None) -> None:
-    """Move sink states (fault/error role) to a right-column zone within their compound parent.
+def _place_sink_states(positions: dict,
+                        state_roles: 'Dict[str, str] | None' = None,
+                        placement: str = 'right') -> None:
+    """Reposition sink states within their compound parent according to placement direction.
 
     Operates in-place on the global positions dict.  For each compound node
-    that has both normal and sink children:
-      - normal children keep their positions
-      - sink children are stacked vertically to the right of the normal bbox,
-        centred on the normal children's vertical midpoint
-      - the parent's width is expanded to fit
+    that has both normal and sink children, sinks are moved out of the ELK-computed
+    position and placed in a dedicated zone:
 
-    elk.hierarchyHandling=INCLUDE_CHILDREN prevents ELK partitioning from
-    working at the compound level, so we enforce the placement here.
+      right  — column to the right of normal bbox, sinks stacked vertically
+      left   — column to the left of normal bbox, sinks stacked vertically
+      bottom — row below normal bbox, sinks stacked horizontally
+      top    — row above normal bbox, sinks stacked horizontally
+      auto   — 'right' when normal bbox is taller than wide, else 'bottom'
+
+    elk.hierarchyHandling=INCLUDE_CHILDREN prevents ELK partitioning from working
+    at the compound level, so placement is enforced here instead.
     """
-    _SINK_ZONE_GAP = 60  # horizontal gap between normal bbox and sink column
+    _GAP = 60  # px gap between normal bbox and sink zone
 
     # Build {parent_path: [child_path, ...]} from the dotted names
     parent_children: Dict[str, list] = {}
@@ -464,52 +523,88 @@ def _place_sink_states_right(positions: dict,
         if parent_path not in positions:
             continue
 
-        def _is_fault(path: str) -> bool:
+        def _is_sink(path: str) -> bool:
             if state_roles and path in state_roles:
-                return state_roles[path] == 'fault'
-            return any(kw in path.rsplit('.', 1)[-1].upper() for kw in _FAULT_KEYWORDS)
+                return state_roles[path] == 'sink'
+            return any(kw in path.rsplit('.', 1)[-1].upper() for kw in _SINK_KEYWORDS)
 
-        fault_paths  = [p for p in child_paths if _is_fault(p)]
-        normal_paths = [p for p in child_paths if p not in fault_paths]
-        if not fault_paths or not normal_paths:
+        sink_paths   = [p for p in child_paths if _is_sink(p)]
+        normal_paths = [p for p in child_paths if p not in sink_paths]
+        if not sink_paths or not normal_paths:
             continue
 
-        px, py, pw, _ = positions[parent_path]
+        px, py, pw, ph = positions[parent_path]
 
         # Bounding box of normal children (global coords)
-        nr = max(positions[p][0] + positions[p][2] for p in normal_paths)  # right edge
+        nl = min(positions[p][0]                    for p in normal_paths)  # left
+        nr = max(positions[p][0] + positions[p][2]  for p in normal_paths)  # right
         nt = min(positions[p][1]                    for p in normal_paths)  # top
         nb = max(positions[p][1] + positions[p][3]  for p in normal_paths)  # bottom
 
-        fault_x = nr + _SINK_ZONE_GAP
-        # Stack sink states vertically, centred on normal children
-        fault_paths_sorted = sorted(fault_paths, key=lambda p: positions[p][1])
-        total_h = sum(positions[p][3] for p in fault_paths_sorted)
-        gaps_h  = 20 * (len(fault_paths_sorted) - 1)
-        cy = (nt + nb) // 2
-        fy = cy - (total_h + gaps_h) // 2
-        fy = max(py + 20, fy)  # don't overlap compound header
+        # Resolve 'auto' before branching
+        eff_placement = placement
+        if placement == 'auto':
+            eff_placement = 'right' if (nb - nt) >= (nr - nl) else 'bottom'
 
-        for fp in fault_paths_sorted:
-            _, _, fw, fh = positions[fp]
-            positions[fp] = (fault_x, fy, fw, fh)
-            fy += fh + 20
+        if eff_placement in ('right', 'left'):
+            # Stack sinks vertically, centred on normal children's vertical midpoint
+            sinks_sorted = sorted(sink_paths, key=lambda p: positions[p][1])
+            total_h = sum(positions[p][3] for p in sinks_sorted)
+            gaps_h  = 20 * (len(sinks_sorted) - 1)
+            cy = (nt + nb) // 2
+            sy = cy - (total_h + gaps_h) // 2
+            sy = max(py + 20, sy)  # don't overlap compound header
 
-        # Expand parent width; trim height to actual content bounding box.
-        # ELK sized the height to fit FAULT_ACTIVE at the bottom; after moving
-        # it right the lower portion is empty — trim it.
-        fault_right   = fault_x + max(positions[p][2] for p in fault_paths)
-        fault_bottom  = max(positions[p][1] + positions[p][3] for p in fault_paths)
-        content_bottom = max(nb, fault_bottom)
-        new_pw = max(pw, fault_right - px + 20)
-        new_ph = content_bottom - py + 20   # trim to content; always >= actual content
-        positions[parent_path] = (px, py, new_pw, new_ph)
+            if eff_placement == 'right':
+                sx = nr + _GAP
+            else:
+                max_sw = max(positions[p][2] for p in sinks_sorted)
+                sx = nl - _GAP - max_sw
+
+            for sp in sinks_sorted:
+                _, _, sw, sh = positions[sp]
+                positions[sp] = (sx, sy, sw, sh)
+                sy += sh + 20
+
+            # Resize parent to fit content
+            sink_r = sx + max(positions[p][2] for p in sink_paths)
+            sink_b = max(positions[p][1] + positions[p][3] for p in sink_paths)
+            new_pw = max(pw, sink_r - px + 20)
+            new_ph = max(nb, sink_b) - py + 20
+            positions[parent_path] = (px, py, new_pw, new_ph)
+
+        else:  # 'bottom' or 'top'
+            # Stack sinks horizontally, centred on normal children's horizontal midpoint
+            sinks_sorted = sorted(sink_paths, key=lambda p: positions[p][0])
+            total_w = sum(positions[p][2] for p in sinks_sorted)
+            gaps_w  = 20 * (len(sinks_sorted) - 1)
+            cx = (nl + nr) // 2
+            sx = cx - (total_w + gaps_w) // 2
+            sx = max(px + 20, sx)
+
+            if eff_placement == 'bottom':
+                sy = nb + _GAP
+            else:
+                max_sh = max(positions[p][3] for p in sinks_sorted)
+                sy = nt - _GAP - max_sh
+
+            for sp in sinks_sorted:
+                _, _, sw, sh = positions[sp]
+                positions[sp] = (sx, sy, sw, sh)
+                sx += sw + 20
+
+            # Resize parent to fit content
+            sink_r = max(positions[p][0] + positions[p][2] for p in sink_paths)
+            sink_b = max(positions[p][1] + positions[p][3] for p in sink_paths)
+            new_pw = max(nr, sink_r) - px + 20
+            new_ph = max(ph, sink_b - py + 20)
+            positions[parent_path] = (px, py, new_pw, new_ph)
 
 
-_FAULT_SPINE_OFFSET = 25  # px left of fault state's left edge for junction spine
+_SINK_SPINE_OFFSET = 25  # px left of fault state's left edge for junction spine
 
 
-def _compute_fault_junctions(positions: dict, state_roles: dict,
+def _compute_sink_junctions(positions: dict, state_roles: dict,
                               transitions: list) -> dict:
     """Build a fault-bus junction descriptor for each fault state that has normal-state sources.
 
@@ -534,7 +629,7 @@ def _compute_fault_junctions(positions: dict, state_roles: dict,
         dst = tr.get('to', '')
         if not src or not dst:
             continue
-        if state_roles.get(dst) == 'fault' and state_roles.get(src) != 'fault':
+        if state_roles.get(dst) == 'sink' and state_roles.get(src) != 'sink':
             if src in positions and dst in positions:
                 fault_targets.setdefault(dst, []).append(src)
 
@@ -545,7 +640,7 @@ def _compute_fault_junctions(positions: dict, state_roles: dict,
         unique_srcs = [s for s in src_list if not (s in seen or seen.add(s))]  # type: ignore[func-returns-value]
 
         fx, fy, _, fh = positions[fault_path]
-        spine_x  = fx - _FAULT_SPINE_OFFSET
+        spine_x  = fx - _SINK_SPINE_OFFSET
         gateway_y = fy + fh // 2
         parent   = fault_path.rsplit('.', 1)[0] if '.' in fault_path else ''
 
@@ -591,3 +686,294 @@ def _compute_fault_junctions(positions: dict, state_roles: dict,
         }
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Bottom-up per-subchart layout
+# ---------------------------------------------------------------------------
+
+def _navigate_to(chart_dict: dict, dotted_path: str) -> dict:
+    """Return the state body dict at dotted_path within chart_dict."""
+    body = chart_dict
+    for segment in dotted_path.split('.'):
+        body = body.get('states', {}).get(segment, {})
+    return body
+
+
+def elk_layout_bottomup(
+    chart_dict: dict,
+    layout_options: 'dict | None' = None,
+    max_label_width: int = _LABEL_MAX_WIDTH_PX,
+    label_substitution: bool = True,
+    direction: str = 'DOWN',
+    auto_sinks: 'frozenset[str]' = frozenset(),
+    sink_bus_junctions: bool = False,
+    sink_placement: str = 'none',
+    subchart_leaf_size: 'tuple | None' = None,
+) -> Tuple[dict, dict, dict]:
+    """Run ELK bottom-up: per-subchart passes first, then chart root.
+
+    Each subchart is laid out independently (ELK sees only its own children),
+    and its bounding box is passed as a fixed size to the parent-level run.
+    This prevents chart-level topology from distorting subchart internal layout.
+
+    Returns (positions, edge_routing, sink_junctions) with chart-global
+    accumulated positions — same format as elk_to_stateflow_layout(), so
+    _sf_states_to_matlab_lines() works unchanged.
+    """
+    all_transitions = chart_dict.get('transitions', [])
+
+    # --- 1. Collect all subchart paths ---
+    subchart_set: set = set()
+
+    def _find_subcharts(states: dict, prefix: str) -> None:
+        for name, body in states.items():
+            path = f'{prefix}.{name}' if prefix else name
+            if body.get('subchart'):
+                subchart_set.add(path)
+            _find_subcharts(body.get('states', {}), path)
+
+    _find_subcharts(chart_dict.get('states', {}), '')
+
+    if not subchart_set:
+        # No subcharts — single-pass is equivalent
+        elk_json = sf_to_elk_json(chart_dict, layout_options=layout_options,
+                                   max_label_width=max_label_width,
+                                   label_substitution=label_substitution,
+                                   direction=direction, auto_sinks=auto_sinks)
+        return elk_to_stateflow_layout(
+            elk_layout(elk_json), chart_dict,
+            sink_bus_junctions=sink_bus_junctions,
+            sink_placement=sink_placement, auto_sinks=auto_sinks,
+        )
+
+    # Deepest subcharts first
+    sorted_subcharts = sorted(subchart_set, key=lambda p: p.count('.'), reverse=True)
+
+    all_positions: Dict[str, Tuple[int, int, int, int]] = {}
+    all_edge_routing: dict = {}
+    fixed_sizes: Dict[str, Tuple[int, int]] = {}
+
+    # --- 2. Per-subchart ELK runs ---
+    for sc_path in sorted_subcharts:
+        sc_body = _navigate_to(chart_dict, sc_path)
+        sc_states = sc_body.get('states', {})
+        if not sc_states:
+            continue
+
+        sc_prefix_dot = sc_path + '.'
+
+        def _rel(path: str, _pfx: str = sc_prefix_dot) -> str:
+            return path[len(_pfx):] if path.startswith(_pfx) else path
+
+        # Transitions strictly inside this subchart (both endpoints under sc_path + '.')
+        sc_transitions = [
+            {**tr,
+             'from': _rel(tr.get('from', '')),
+             'to':   _rel(tr.get('to', '')),
+             '_orig_idx': orig_idx}
+            for orig_idx, tr in enumerate(all_transitions)
+            if (tr.get('from', '').startswith(sc_prefix_dot)
+                and tr.get('to', '').startswith(sc_prefix_dot))
+        ]
+
+        # fixed_sizes keys relative to this subchart
+        sc_fixed = {
+            path[len(sc_prefix_dot):]: sz
+            for path, sz in fixed_sizes.items()
+            if path.startswith(sc_prefix_dot)
+        }
+        sc_auto_sinks = frozenset(
+            path[len(sc_prefix_dot):] for path in auto_sinks
+            if path.startswith(sc_prefix_dot)
+        )
+
+        elk_json = sf_to_elk_json(
+            {'states': sc_states, 'transitions': sc_transitions},
+            layout_options=layout_options, max_label_width=max_label_width,
+            label_substitution=label_substitution, direction=direction,
+            auto_sinks=sc_auto_sinks, fixed_sizes=sc_fixed,
+        )
+        # Apply the subchart's own header height as top padding on the root
+        # graph so child states land below the header label area.  Only set if
+        # the caller hasn't already specified elk.padding in layout_options.
+        if 'elk.padding' not in (layout_options or {}):
+            sc_header_h = _compound_header_h(sc_body)
+            elk_json.setdefault('layoutOptions', {})['elk.padding'] = (
+                f'[top={sc_header_h + 20},right=20,bottom=20,left=20]'
+            )
+        elk_result = elk_layout(elk_json)
+
+        # Accumulated positions (subchart-root = 0,0; subchart-relative)
+        run_pos: Dict[str, Tuple[int, int, int, int]] = {}
+
+        def _collect_run(node: dict, ox: float, oy: float,
+                         _rp: dict = run_pos) -> None:
+            nid = node.get('id', '')
+            nx, ny = ox + node.get('x', 0.0), oy + node.get('y', 0.0)
+            if nid and nid != 'root':
+                _rp[nid] = (int(nx), int(ny),
+                            int(node.get('width', 0)), int(node.get('height', 0)))
+            for child in node.get('children', []):
+                _collect_run(child, nx, ny, _rp)
+
+        _collect_run(elk_result, 0.0, 0.0)
+
+        # Store subchart-relative — will be offset to chart-global in step 4
+        for rel_path, pos in run_pos.items():
+            all_positions[f'{sc_path}.{rel_path}'] = pos
+
+        # Edge routing (LCA-relative mid; OClock uses subchart-relative run_pos)
+        def _collect_run_er(node: dict, ox: float, oy: float,
+                            _rp: dict = run_pos,
+                            _scp: str = sc_path) -> None:
+            nx, ny = ox + node.get('x', 0.0), oy + node.get('y', 0.0)
+            for edge in node.get('edges', []):
+                eid = edge.get('id', '')
+                if not eid.startswith('EDGE||'):
+                    continue
+                secs = edge.get('sections', [])
+                if not secs:
+                    continue
+                sec = secs[0]
+                parts = eid.split('||')
+                src_rel = parts[1] if len(parts) > 1 else ''
+                dst_rel = parts[2] if len(parts) > 2 else ''
+                idx_s   = parts[3] if len(parts) > 3 else '0'
+                start = sec.get('startPoint', {'x': 0.0, 'y': 0.0})
+                end   = sec.get('endPoint',   {'x': 0.0, 'y': 0.0})
+                mid_x = int((start['x'] + end['x']) / 2)
+                mid_y = int((start['y'] + end['y']) / 2)
+                src_oc, dst_oc = 3.0, 9.0
+                if src_rel in _rp:
+                    sx, sy, sw, sh = _rp[src_rel]
+                    src_oc = _point_to_oclock(start['x'], start['y'],
+                                              sx - nx, sy - ny, sw, sh)
+                if dst_rel in _rp:
+                    dx, dy, dw, dh = _rp[dst_rel]
+                    dst_oc = _point_to_oclock(end['x'], end['y'],
+                                              dx - nx, dy - ny, dw, dh)
+                sf = f'{_scp}.{src_rel}' if src_rel else _scp
+                df = f'{_scp}.{dst_rel}' if dst_rel else _scp
+                all_edge_routing[f'EDGE||{sf}||{df}||{idx_s}'] = {
+                    'mid_x': mid_x, 'mid_y': mid_y,
+                    'src_oclock': src_oc, 'dst_oclock': dst_oc,
+                }
+            for child in node.get('children', []):
+                _collect_run_er(child, nx, ny, _rp, _scp)
+
+        _collect_run_er(elk_result, 0.0, 0.0)
+
+        # Fixed size for the parent-level ELK run.
+        # By default subcharts are treated as opaque leaf nodes at the parent
+        # level — sized from their own label/actions (same as a collapsed
+        # Stateflow subchart box), not from internal content.
+        # subchart_leaf_size overrides this with an explicit (w, h) tuple.
+        if subchart_leaf_size is not None:
+            fixed_sizes[sc_path] = subchart_leaf_size
+        else:
+            from slxgen.stateflow import _sf_state_size  # noqa: PLC0415
+            _leaf_body = {k: v for k, v in sc_body.items() if k != 'states'}
+            fixed_sizes[sc_path] = _sf_state_size(_leaf_body)
+
+    # --- 3. Chart-root ELK run (subcharts are fixed-size leaves) ---
+    root_elk_json = sf_to_elk_json(
+        chart_dict, layout_options=layout_options,
+        max_label_width=max_label_width, label_substitution=label_substitution,
+        direction=direction, auto_sinks=auto_sinks, fixed_sizes=fixed_sizes,
+    )
+    root_elk_result = elk_layout(root_elk_json)
+
+    chart_global: Dict[str, Tuple[int, int, int, int]] = {}
+
+    def _collect_root(node: dict, ox: float, oy: float) -> None:
+        nid = node.get('id', '')
+        nx, ny = ox + node.get('x', 0.0), oy + node.get('y', 0.0)
+        if nid and nid != 'root':
+            pos = (int(nx), int(ny),
+                   int(node.get('width', 0)), int(node.get('height', 0)))
+            chart_global[nid] = pos
+            all_positions[nid] = pos
+        # Don't recurse into subcharts (their internals come from per-subchart runs)
+        if nid not in subchart_set:
+            for child in node.get('children', []):
+                _collect_root(child, nx, ny)
+
+    _collect_root(root_elk_result, 0.0, 0.0)
+
+    # Edge routing for chart-level transitions
+    def _collect_root_er(node: dict, ox: float, oy: float) -> None:
+        nx, ny = ox + node.get('x', 0.0), oy + node.get('y', 0.0)
+        nid = node.get('id', '')
+        for edge in node.get('edges', []):
+            eid = edge.get('id', '')
+            if not eid.startswith('EDGE||'):
+                continue
+            secs = edge.get('sections', [])
+            if not secs:
+                continue
+            sec = secs[0]
+            parts = eid.split('||')
+            src_p = parts[1] if len(parts) > 1 else ''
+            dst_p = parts[2] if len(parts) > 2 else ''
+            start = sec.get('startPoint', {'x': 0.0, 'y': 0.0})
+            end   = sec.get('endPoint',   {'x': 0.0, 'y': 0.0})
+            mid_x = int((start['x'] + end['x']) / 2)
+            mid_y = int((start['y'] + end['y']) / 2)
+            src_oc, dst_oc = 3.0, 9.0
+            if src_p in chart_global:
+                sx, sy, sw, sh = chart_global[src_p]
+                src_oc = _point_to_oclock(start['x'], start['y'],
+                                          sx - nx, sy - ny, sw, sh)
+            if dst_p in chart_global:
+                dx, dy, dw, dh = chart_global[dst_p]
+                dst_oc = _point_to_oclock(end['x'], end['y'],
+                                          dx - nx, dy - ny, dw, dh)
+            all_edge_routing[eid] = {
+                'mid_x': mid_x, 'mid_y': mid_y,
+                'src_oclock': src_oc, 'dst_oclock': dst_oc,
+            }
+        if nid not in subchart_set:
+            for child in node.get('children', []):
+                _collect_root_er(child, nx, ny)
+
+    _collect_root_er(root_elk_result, 0.0, 0.0)
+
+    # --- 4. Convert subchart-relative positions to chart-global ---
+    # Process shallowest subcharts first so nested offsets accumulate correctly.
+    for sc_path in reversed(sorted_subcharts):
+        if sc_path not in all_positions:
+            continue
+        sc_gx, sc_gy = all_positions[sc_path][:2]
+        sc_prefix_dot = sc_path + '.'
+        # Deeper subchart prefixes — their children are handled in their own pass
+        deeper = tuple(p + '.' for p in subchart_set if p.startswith(sc_prefix_dot))
+        for full_path in list(all_positions.keys()):
+            if not full_path.startswith(sc_prefix_dot):
+                continue
+            if deeper and any(full_path.startswith(d) for d in deeper):
+                continue
+            rx, ry, rw, rh = all_positions[full_path]
+            all_positions[full_path] = (sc_gx + rx, sc_gy + ry, rw, rh)
+
+    # --- 5. Sink placement and sink junctions ---
+    state_roles: Dict[str, str] = {}
+
+    def _collect_roles(states: dict, prefix: str) -> None:
+        for name, body in states.items():
+            path = f'{prefix}.{name}' if prefix else name
+            state_roles[path] = _state_role(name, body, path=path, auto_sinks=auto_sinks)
+            _collect_roles(body.get('states', {}), path)
+
+    _collect_roles(chart_dict.get('states', {}), '')
+
+    if sink_placement != 'none':
+        _place_sink_states(all_positions, state_roles, sink_placement)
+        _recompute_sink_edge_routing(all_edge_routing, all_positions, state_roles, sink_placement)
+
+    sink_junctions = (
+        _compute_sink_junctions(all_positions, state_roles, all_transitions)
+        if sink_bus_junctions else {}
+    )
+
+    return all_positions, all_edge_routing, sink_junctions

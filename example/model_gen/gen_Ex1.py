@@ -78,8 +78,8 @@ variants = [
 #     {
 #         'suffix':     '_ortho',
 #         'model_name': BASE_NAME + '_ortho',
-#         'desc':       'fault-bus junctions + orthogonal H/V routing',
-#         'opts':       {'__fault_bus_junctions__': 'true', '__orthogonal_junctions__': 'true'},
+#         'desc':       'sink-bus junctions + orthogonal H/V routing',
+#         'opts':       {'__sink_bus_junctions__': 'true', '__orthogonal_junctions__': 'true'},
 #     },
 #     {
 #         'suffix':     '_bare',
@@ -91,7 +91,7 @@ variants = [
 #         'suffix':     '_sink',
 #         'model_name': BASE_NAME + '_sink',
 #         'desc':       'post-ELK sink-state right-column repositioning (diagnostic)',
-#         'opts':       {'__no_sink_placement__': 'false'},
+#         'opts':       {'__sink_placement__': 'right'},
 #     },
 # ]
 

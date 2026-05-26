@@ -445,71 +445,11 @@ entry:
 
 ---
 
-## 18. YAML-to-Stateflow Code Generation (slxgen)
+## 18. Automation compatibility (slxgen)
 
-### 18.1 Overview
+This guideline is designed to be machine-readable. The `slxgen` tool converts YAML state-machine descriptions that follow these rules into MATLAB Stateflow scripts automatically.
 
-`slxgen` converts a YAML state-machine description into a MATLAB script that builds a Stateflow chart programmatically. It uses **ELK** (Eclipse Layout Kernel) to compute state positions and transition routing before emitting MATLAB. The generated script is self-contained and reproducible.
-
-### 18.2 Layout pipeline
-
-1. **ELK layout** — computes node positions and edge routes. States are layered top-to-bottom (DOWN direction). The init state goes to the first layer; sink states (fault/error role) get `layerConstraint=LAST`.
-2. **Sink-state repositioning** — after ELK runs, states with role `fault` (or names containing `FAULT`/`ERROR`) are moved to a right column within their compound parent. ELK places them at the bottom row (last layer in DOWN direction); the right-column convention requires post-processing.
-3. **Edge routing recompute** — after repositioning, transition geometry to sink states is recalculated using final positions, giving accurate OClock 3 → 9 (right-exit, left-entry) horizontal routing.
-4. **Precise OClock** — all non-sink transitions use float OClock values derived from ELK's exact boundary attachment point (arc-distance on perimeter, 0–12 clock face). This replaces the old 4-value cardinal snap.
-
-### 18.3 Sink-state concept
-
-The "sink state" concept is topological, not semantic: any state that collects many incoming transitions from sibling states benefits from right-column placement to keep transition lines short and readable. The `role: fault` annotation in the YAML is the mechanism to declare a state as a sink, but the concept generalises to any exception / consolidation state.
-
-### 18.4 Available elk_options
-
-Pass as `elk_options` dict to `sf_yaml_to_matlab()`:
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `__fault_bus_junctions__` | `false` | Route sink transitions through a vertical junction bus spine |
-| `__orthogonal_junctions__` | `false` | Strict H/V spine routing (requires `fault_bus_junctions=true`) |
-| `__direction__` | `DOWN` | ELK layout direction for normal states |
-| `__max_label_width__` | `150` | Pixel cap for transition label width estimation |
-| `__label_substitution__` | `true` | Replace long labels with short identifiers for ELK sizing |
-| `__bare_transitions__` | `false` | Skip all transition geometry (diagnostic — Stateflow auto-routes) |
-| `__no_sink_placement__` | `true` | Skip post-ELK sink repositioning — pure ELK output (default). Set `false` to enable right-column sink repositioning. |
-
-### 18.5 Recommended configuration
-
-**Default — pure ELK arc routing:**
-
-```python
-sf_yaml_to_matlab(yaml_path, elk_options={})
-```
-
-Produces curved arcs with precise float OClock entry/exit points derived from ELK boundary coordinates. ELK output is used as-is with no post-processing. Suitable for all charts.
-
-**Optional — sink right-column repositioning:**
-
-```python
-sf_yaml_to_matlab(yaml_path, elk_options={'__no_sink_placement__': 'false'})
-```
-
-After ELK runs, states with `role: fault` (or names containing `FAULT`/`ERROR`) are moved to a right column within their parent container and transition geometry is recomputed. Useful when fault states collect many incoming transitions and right-column placement improves readability.
-
-**Experimental — fault-bus junction spine (not yet recommended for production):**
-
-```python
-sf_yaml_to_matlab(yaml_path, elk_options={
-    '__fault_bus_junctions__': 'true',
-    '__orthogonal_junctions__': 'true',
-})
-```
-
-Produces a vertical junction spine to the left of each sink state. Known issue: source states positioned *below* the gateway junction produce an upward fan arc instead of a straight horizontal segment. Deferred until geometry is improved.
-
-### 18.6 Layout limitations (known, deferred)
-
-- **State box sizing** is estimated from character counts; multi-line action text can produce slightly undersized boxes. Manual `width`/`height` overrides in the YAML are the workaround until the estimator is improved.
-- **Transition label placement** uses a fixed left-margin offset (`_ELK_LABEL_MID_X`) for ELK-routed transitions with labels; this prevents labels from overflowing the container but may overlap dense transitions.
-- **READY-below-sink edge case** in the junction bus topology: when a source state is positioned below the gateway junction, the fan connector creates an upward arc instead of a straight horizontal. Functional but not perfectly orthogonal. Deferred.
+For details on the slxgen pipeline, coordinate system, ELK layout options, and known limitations, see [slxgen_internals.md](slxgen_internals.md).
 
 ---
 
