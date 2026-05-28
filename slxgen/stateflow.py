@@ -16,11 +16,6 @@ except ImportError:
 
 from slxgen.stateflow_sir import yaml_to_sir, sir_validate, sir_to_chart_dict
 
-# When ELK routing is used, labeled transitions get their MidPoint x overridden to this
-# LCA-relative offset so labels start near the container's left margin and extend rightward
-# rather than starting at the geometric arc center (which typically overflows the container).
-_ELK_LABEL_MID_X = 10
-
 
 # ----------------------------------------------------------------------
 # SLX parsing — Stateflow machine + chart XML
@@ -330,14 +325,16 @@ def _collect_sf_charts(slim: Dict) -> Dict[str, Dict]:
 
 # Layout constants (Stateflow pixels)
 _SF_LEAF_W       = 150   # minimum width of a leaf state
+_SF_PX_PER_CHAR  = 7.5   # approximate px width per character in Stateflow label font
 _SF_LEAF_H       = 80    # minimum height of a leaf state
 _SF_HEADER_H     = 30    # top strip reserved for state name label inside a parent
 _SF_PADDING      = 20    # inner padding between parent edge and children
 _SF_GAP          = 20    # gap between sibling states
 _SF_MAX_COLS     = 4     # max columns in a single row (horizontal layout)
 _SF_VERT_THRESH  = 5     # switch to single-column vertical layout above this many normal children
-_SF_LABEL_LINE_H = 16    # pixels per text line in label
-_SF_LABEL_PAD    = 20    # top+bottom padding inside leaf label area
+_SF_LABEL_LINE_H  = 16   # pixels per text line in label
+_SF_LABEL_PAD     = 20   # top+bottom padding inside leaf label area
+_SF_LABEL_STAGGER = 25   # min vertical separation between stacked transition labels (px)
 
 
 def _bfs_order(states_dict: Dict, transitions: list,
@@ -398,6 +395,82 @@ def _sf_label_height(state_body: Dict) -> int:
             lines += 1                       # "kw:" keyword line
             lines += len(text.split('\n'))   # code lines
     return max(_SF_LEAF_H, _SF_LABEL_LINE_H * lines + _SF_LABEL_PAD)
+
+
+def _sf_leaf_width(state_body: Dict, name: str = '') -> int:
+    """Estimate leaf state pixel width from the longest label line."""
+    lines = [name] if name else []
+    for kw in ('en', 'du', 'ex'):
+        text = state_body.get(kw, '').strip()
+        if text:
+            lines.append(kw + ':')
+            lines.extend(text.split('\n'))
+    if not lines:
+        return _SF_LEAF_W
+    max_chars = max(len(l) for l in lines)
+    return max(_SF_LEAF_W, int(max_chars * _SF_PX_PER_CHAR) + 20)
+
+
+def _label_gap_bounds(src_path: str, dst_path: str, positions: dict,
+                      margin: int = 5) -> tuple:
+    """Return (y_min, y_max) bounding the gap between src and dst states.
+
+    For a forward (downward) edge: gap = [src_bottom + margin, dst_top - margin].
+    Returns (None, None) for back-edges, missing positions, or zero-height gaps.
+    """
+    if src_path not in positions or dst_path not in positions:
+        return None, None
+    _, src_y, _, src_h = positions[src_path]
+    _, dst_y, _,  _    = positions[dst_path]
+    lo = src_y + src_h + margin
+    hi = dst_y - margin
+    return (lo, hi) if lo < hi else (None, None)
+
+
+def _stagger_label_y(mid_y: int, y_min, y_max, used: list, step: int) -> int:
+    """Find a y near mid_y that does not collide with any entry in `used` (within ±step).
+
+    Alternates above/below mid_y in `step` increments; clamps to [y_min, y_max].
+    Falls back to mid_y if no free slot is found within 10 steps.
+    """
+    def _ok(y: int) -> bool:
+        if y_min is not None and y < y_min:
+            return False
+        if y_max is not None and y > y_max:
+            return False
+        return not any(abs(y - u) < step for u in used)
+
+    if _ok(mid_y):
+        return mid_y
+    for n in range(1, 11):
+        for candidate in (mid_y + n * step, mid_y - n * step):
+            if _ok(candidate):
+                return candidate
+    return mid_y
+
+
+def _push_label_outside_states(mid_x: int, mid_y: int, positions: dict,
+                                src_path: str = '', dst_path: str = '',
+                                margin: int = 15) -> tuple:
+    """Push label anchor (mid_x, mid_y) down when it lands inside an intermediate state.
+
+    Skips states that are ancestors of src or dst. For any other state whose box
+    contains (mid_x, mid_y), shifts mid_y to just below the state box.
+
+    Returns (mid_x, mid_y).
+    """
+    def _ancestors(path: str) -> set:
+        if not path:
+            return set()
+        parts = path.split('.')
+        return {'.'.join(parts[:i + 1]) for i in range(len(parts))}
+
+    excluded = _ancestors(src_path) | _ancestors(dst_path)
+
+    for state_path, (px, py, pw, ph) in positions.items():
+        if state_path not in excluded and px <= mid_x <= px + pw and py <= mid_y <= py + ph:
+            return mid_x, py + ph + margin
+    return mid_x, mid_y
 
 
 def _direct_child_name(path: str, prefix: str) -> str:
@@ -480,11 +553,13 @@ def _compute_auto_sinks(states_dict: Dict, transitions: list,
     )
 
 
-def _sf_state_size(state_body: Dict, transitions=None, path_prefix: str = '') -> tuple:
+def _sf_state_size(state_body: Dict, transitions=None, path_prefix: str = '',
+                   adaptive_leaf_width: bool = False, name: str = '') -> tuple:
     """Return (width, height) required to render this state and all its children."""
     children = state_body.get('states', {})
     if not children:
-        return (_SF_LEAF_W, _sf_label_height(state_body))
+        w = _sf_leaf_width(state_body, name) if adaptive_leaf_width else _SF_LEAF_W
+        return (w, _sf_label_height(state_body))
 
     names = list(children.keys())
 
@@ -498,11 +573,12 @@ def _sf_state_size(state_body: Dict, transitions=None, path_prefix: str = '') ->
         normal_names = names
         sink_list = []
 
-    def child_prefix(name):
-        return f'{path_prefix}.{name}' if path_prefix else name
+    def child_prefix(cname):
+        return f'{path_prefix}.{cname}' if path_prefix else cname
 
-    sizes = {name: _sf_state_size(children[name], transitions, child_prefix(name))
-             for name in names}
+    sizes = {cname: _sf_state_size(children[cname], transitions, child_prefix(cname),
+                                    adaptive_leaf_width=adaptive_leaf_width, name=cname)
+             for cname in names}
 
     n = len(normal_names)
     cols = 1 if n > _SF_VERT_THRESH else min(n, _SF_MAX_COLS)
@@ -770,6 +846,7 @@ def _sf_states_to_matlab_lines(
 
         if state_body.get('subchart'):
             lines.append(f"{var}.IsSubchart = true;")
+            lines.append(f"{var}.ContentPreviewEnabled = false;")
 
         if state_body.get('type') == 'AND':
             lines.append(f"{var}.Decomposition = 'PARALLEL_AND';")
@@ -859,7 +936,13 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
         lines.append(f"{v}.Name = '{_escape_matlab_str(d['name'])}';")
         lines.append(f"{v}.Scope = 'Input';")
         if d.get('type'):
+            lines.append(f"{v}.Props.Type.Method = 'Built-in';")
             lines.append(f"{v}.DataType = '{_escape_matlab_str(d['type'])}';")
+        if d.get('initial_value') is not None:
+            lines.append(f"{v}.Props.InitialValue = '{_escape_matlab_str(str(d['initial_value']))}';")
+        if d.get('size') and d['size'] != [1]:
+            size_str = ' '.join(str(n) for n in d['size'])
+            lines.append(f"{v}.Props.Array.Size = '[{size_str}]';")
 
     outputs = chart_dict.get('outputs', [])
     if outputs:
@@ -871,7 +954,13 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
         lines.append(f"{v}.Name = '{_escape_matlab_str(d['name'])}';")
         lines.append(f"{v}.Scope = 'Output';")
         if d.get('type'):
+            lines.append(f"{v}.Props.Type.Method = 'Built-in';")
             lines.append(f"{v}.DataType = '{_escape_matlab_str(d['type'])}';")
+        if d.get('initial_value') is not None:
+            lines.append(f"{v}.Props.InitialValue = '{_escape_matlab_str(str(d['initial_value']))}';")
+        if d.get('size') and d['size'] != [1]:
+            size_str = ' '.join(str(n) for n in d['size'])
+            lines.append(f"{v}.Props.Array.Size = '[{size_str}]';")
 
     locals_ = chart_dict.get('locals', [])
     if locals_:
@@ -883,7 +972,13 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
         lines.append(f"{v}.Name = '{_escape_matlab_str(d['name'])}';")
         lines.append(f"{v}.Scope = 'Local';")
         if d.get('type'):
+            lines.append(f"{v}.Props.Type.Method = 'Built-in';")
             lines.append(f"{v}.DataType = '{_escape_matlab_str(d['type'])}';")
+        if d.get('initial_value') is not None:
+            lines.append(f"{v}.Props.InitialValue = '{_escape_matlab_str(str(d['initial_value']))}';")
+        if d.get('size') and d['size'] != [1]:
+            size_str = ' '.join(str(n) for n in d['size'])
+            lines.append(f"{v}.Props.Array.Size = '[{size_str}]';")
 
     states_dict = chart_dict.get('states', {})
     # Preserve original YAML order for ELK (edge model-order affects LINEAR_SEGMENTS placement).
@@ -917,10 +1012,15 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
                 _no_fp     = _elk_opts.pop('__no_sink_placement__',    None)  # backward compat
                 _auto_sink = _elk_opts.pop('__auto_sink__',            None)
                 _sc_leaf   = _elk_opts.pop('__subchart_leaf_size__',   None)
+                _dump_elk  = _elk_opts.pop('__dump_elk_dir__',         None)
+                _adapt_lw  = _elk_opts.pop('__adaptive_leaf_width__',  None)
+                _adapt_sp  = _elk_opts.pop('__adaptive_spacing__',     None)
                 _elk_kw: dict = {}
                 if _max_lw    is not None: _elk_kw['max_label_width']    = int(_max_lw)
                 if _label_sub is not None: _elk_kw['label_substitution'] = bool(_label_sub)
                 if _dir       is not None: _elk_kw['direction']          = str(_dir)
+                if _adapt_lw  is not None: _elk_kw['adaptive_leaf_width'] = bool(_adapt_lw)
+                if _adapt_sp  is not None: _elk_kw['adaptive_spacing']    = bool(_adapt_sp)
                 auto_sinks: 'frozenset[str]' = frozenset()
                 if _auto_sink is not None:
                     _min = int(_auto_sink) if _auto_sink.isdigit() else 2
@@ -942,7 +1042,7 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
                     {'states': states_dict, 'transitions': transitions},
                     layout_options=_elk_opts, auto_sinks=auto_sinks,
                     sink_bus_junctions=_fbus_flag, sink_placement=sink_placement,
-                    subchart_leaf_size=sc_leaf_size,
+                    subchart_leaf_size=sc_leaf_size, dump_dir=_dump_elk,
                     **_elk_kw)
                 orthogonal_junctions = _ortho is not None and _ortho.lower() in ('1', 'true', 'yes')
                 bare_transitions     = _bare_tr is not None and _bare_tr.lower() in ('1', 'true', 'yes')
@@ -1052,12 +1152,6 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
                 sx, sy, sw, sh = positions[src_path]
                 mid_x = (sx + sw - lca_x + jbus['spine_x'] - lca_x) // 2
                 mid_y = sy + sh // 2 - lca_y
-                if label:
-                    key  = (lca, mid_x // 100)
-                    used = _stagger_used.setdefault(key, [])
-                    while any(abs(mid_y - u) < 25 for u in used):
-                        mid_y += 25
-                    used.append(mid_y)
                 lines.append(f"{tv} = Stateflow.Transition({tr_parent_var});")
                 if src_var:
                     lines.append(f"{tv}.Source = {src_var};")
@@ -1069,9 +1163,15 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
                 lines.append(f"{tv}.SourceOClock = 3;")
                 if orthogonal_junctions:
                     lines.append(f"{tv}.DestinationOClock = 9;")
-                # Always set MidPoint using the geometric midpoint so the label
-                # stays between the source and the junction (not auto-floated).
                 lines.append(f"{tv}.MidPoint = [{mid_x} {mid_y}];")
+                if label:
+                    lj, ly = mid_x, mid_y
+                    key  = (lca, min(src_path, dst_path), max(src_path, dst_path))
+                    used = _stagger_used.setdefault(key, [])
+                    ly = _stagger_label_y(ly, None, None, used, _SF_LABEL_STAGGER)
+                    used.append(ly)
+                    lw = min(max(int(len(label) * _SF_PX_PER_CHAR) + 20, 60), 300)
+                    lines.append(f"{tv}.LabelPosition = [{lj - lw // 2} {ly - _SF_LABEL_LINE_H // 2} {lw} {_SF_LABEL_LINE_H}];")
                 continue  # skip normal emit for this transition
 
         # --- Normal emit
@@ -1095,15 +1195,18 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
             lca_x, lca_y = (positions[lca][0], positions[lca][1]) if lca and lca in positions else (0, 0)
             if edge_id in edge_routing:
                 er = edge_routing[edge_id]
-                mid_x = _ELK_LABEL_MID_X if label else er['mid_x']
+                mid_x = er['mid_x']
                 mid_y = er['mid_y']
-                if label:
-                    key  = (lca, mid_x // 100)
-                    used = _stagger_used.setdefault(key, [])
-                    while any(abs(mid_y - u) < 25 for u in used):
-                        mid_y += 25
-                    used.append(mid_y)
                 lines.append(f"{tv}.MidPoint = [{mid_x} {mid_y}];")
+                if label:
+                    lx, ly = _push_label_outside_states(mid_x, mid_y, positions, src_path, dst_path)
+                    y_lo, y_hi = _label_gap_bounds(src_path, dst_path, positions)
+                    key  = (lca, min(src_path, dst_path), max(src_path, dst_path))
+                    used = _stagger_used.setdefault(key, [])
+                    ly = _stagger_label_y(ly, y_lo, y_hi, used, _SF_LABEL_STAGGER)
+                    used.append(ly)
+                    lw = min(max(int(len(label) * _SF_PX_PER_CHAR) + 20, 60), 300)
+                    lines.append(f"{tv}.LabelPosition = [{lx - lw // 2} {ly - _SF_LABEL_LINE_H // 2} {lw} {_SF_LABEL_LINE_H}];")
                 lines.append(f"{tv}.SourceOClock = {er['src_oclock']};")
                 lines.append(f"{tv}.DestinationOClock = {er['dst_oclock']};")
             else:

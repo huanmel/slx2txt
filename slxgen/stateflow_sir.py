@@ -23,7 +23,8 @@ class SIRVariable:
     name: str
     scope: str           # 'input' | 'output' | 'local'
     type: str | None
-    initial_value: Any   # None if unspecified in YAML
+    initial_value: Any        # None if unspecified in YAML
+    size: list | None = None  # None / [1] = scalar; [3,1] = column vector; [3,3] = matrix
 
 
 @dataclass
@@ -83,6 +84,7 @@ def yaml_to_sir(chart_dict: dict) -> SIRModel:
                 scope=scope_label,
                 type=v.get('type'),
                 initial_value=v.get('initial_value'),
+                size=v.get('size'),
             ))
 
     # --- States (recursive flatten, depth-first pre-order) ---
@@ -355,6 +357,8 @@ def sir_to_chart_dict(sir: SIRModel) -> dict:
             entry['type'] = v.type
         if v.initial_value is not None:
             entry['initial_value'] = v.initial_value
+        if v.size is not None:
+            entry['size'] = v.size
         var_lists[scope_keys[v.scope]].append(entry)
 
     # --- States: flat list -> nested dict ---
