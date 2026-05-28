@@ -23,9 +23,47 @@ _COMPOUND_HEADER_MIN_H  = 30   # minimum top padding (state name only)
 _DEFAULT_TRANSITION_PAD = 40   # extra top padding so default-transition dot fits inside container
 
 # --- Layout spacing defaults (edit here to tune the generated chart appearance) ---
-_NODE_SPACING         = 30   # px gap between sibling states (ELK nodeNode / nodeNodeBetweenLayers)
+_NODE_SPACING         = 50   # px gap between sibling states (ELK nodeNode / nodeNodeBetweenLayers)
 _DEFAULT_TRANS_OFFSET = 20   # px above destination state top for the default-transition dot
-                              # must satisfy: _DEFAULT_TRANS_OFFSET < _NODE_SPACING
+                              # must satisfy: _DEFAULT_TRANS_OFFSET < _NODE_SPACING  (20 < 50 ✓)
+_LABEL_STAGGER_PX     = 25   # min vertical separation between stacked transition labels
+
+
+def _max_labeled_between_siblings(transitions: list, child_names) -> int:
+    """Max count of labeled transitions between any unordered sibling pair.
+
+    child_names: direct-child names at this ELK scope (first path component = child name).
+    transitions: 'from'/'to' relative to the scope root (or full-path for root scope).
+    Labeled = has a non-empty condition, action, or trigger field.
+    Counts both A→B and B→A in the same bucket (unordered pair).
+    """
+    from collections import Counter
+    child_set = set(child_names)
+    counts: Counter = Counter()
+    for t in transitions:
+        src = (t.get('from') or '').split('.')[0]
+        dst = (t.get('to') or '').split('.')[0]
+        if not src or not dst or src not in child_set or dst not in child_set or src == dst:
+            continue
+        if t.get('condition') or t.get('action') or t.get('trigger'):
+            counts[tuple(sorted((src, dst)))] += 1
+    return max(counts.values(), default=0)
+
+
+def _spacing_opts(transitions: list, child_names, base_opts, adaptive: bool) -> dict:
+    """Return a layout_options dict with adaptive nodeNode spacing merged in.
+
+    Uses setdefault so explicit user values in base_opts are preserved.
+    Gap formula: max(_NODE_SPACING, max_labeled_pairs × _LABEL_STAGGER_PX + _NODE_SPACING // 2).
+    """
+    if not adaptive:
+        return base_opts
+    max_lbl = _max_labeled_between_siblings(transitions, child_names)
+    gap = max(_NODE_SPACING, max_lbl * _LABEL_STAGGER_PX + _NODE_SPACING // 2)
+    lo = dict(base_opts or {})
+    lo.setdefault('elk.spacing.nodeNode',                      str(gap))
+    lo.setdefault('elk.layered.spacing.nodeNodeBetweenLayers', str(gap))
+    return lo
 
 
 def _label_size(text: str, max_width: int = _LABEL_MAX_WIDTH_PX) -> Tuple[int, int]:
@@ -90,7 +128,8 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
                    label_substitution: bool = True,
                    direction: str = 'DOWN',
                    auto_sinks: 'frozenset[str]' = frozenset(),
-                   fixed_sizes: 'dict | None' = None) -> dict:
+                   fixed_sizes: 'dict | None' = None,
+                   adaptive_leaf_width: bool = False) -> dict:
     """Build an ELK graph JSON from a chart_dict (sf.yaml structure).
 
     chart_dict must have 'states' and optionally 'transitions' keys.
@@ -115,6 +154,19 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
     states_dict = chart_dict.get('states', {})
     transitions = chart_dict.get('transitions', [])
 
+    def _promote_endpoint(path: str) -> str:
+        """If path is inside a fixed-size compound, return that compound's path.
+
+        This ensures ELK receives valid node references when a compound state is
+        treated as an opaque leaf (its children are not nodes in this ELK pass).
+        """
+        parts = path.split('.')
+        for i in range(len(parts) - 1, 0, -1):
+            prefix = '.'.join(parts[:i])
+            if prefix in _fixed:
+                return prefix
+        return path
+
     # Group non-default transitions by LCA path ('' = chart root)
     lca_edges: Dict[str, list] = {}
     for order, tr in enumerate(transitions):
@@ -122,7 +174,14 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
         dst = tr.get('to', '')
         if not src:
             continue  # default transition — skip
-        lca = _lca_path(src, dst)
+        # Promote endpoints that are inside fixed-size compound leaves so ELK
+        # receives valid node references.  The edge id keeps the original paths
+        # so routing lookup in stateflow.py continues to work unchanged.
+        src_node = _promote_endpoint(src)
+        dst_node = _promote_endpoint(dst)
+        if src_node == dst_node:
+            continue  # intra-compound edge; handled in the compound's own ELK pass
+        lca = _lca_path(src_node, dst_node)
         # _orig_idx allows per-subchart runs to preserve original YAML transition indices
         edge_id = f"EDGE||{src}||{dst}||{tr.get('_orig_idx', order)}"
         label_parts: List[str] = []
@@ -135,8 +194,8 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
         label_text = ' '.join(label_parts)
         edge: dict = {
             'id': edge_id,
-            'sources': [src],
-            'targets': [dst],
+            'sources': [src_node],
+            'targets': [dst_node],
         }
         if label_text and not label_substitution:
             lw, lh = _label_size(label_text, max_label_width)
@@ -212,7 +271,7 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
             return node
 
         if not children_dict:
-            w, h = _sf_state_size(body)
+            w, h = _sf_state_size(body, adaptive_leaf_width=adaptive_leaf_width, name=name)
             node['width'] = w
             node['height'] = h
         else:
@@ -296,7 +355,7 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
         'elk.spacing.nodeNode':                         str(_NODE_SPACING),
         'elk.layered.spacing.nodeNodeBetweenLayers':    str(_NODE_SPACING),
         'elk.layered.layering.strategy':                'LONGEST_PATH',
-        'elk.layered.cycleBreaking.strategy':           'GREEDY_MODEL_ORDER',
+        'elk.layered.cycleBreaking.strategy':           'DEPTH_FIRST',
         'elk.layered.nodePlacement.strategy':           'LINEAR_SEGMENTS',
         'elk.layered.nodePlacement.alignment':          'CENTER',
         'elk.edgeRouting':                              'SPLINES',
@@ -740,6 +799,9 @@ def elk_layout_bottomup(
     sink_bus_junctions: bool = False,
     sink_placement: str = 'none',
     subchart_leaf_size: 'tuple | None' = None,
+    dump_dir: 'Path | str | None' = None,
+    adaptive_leaf_width: bool = False,
+    adaptive_spacing: bool = False,
 ) -> Tuple[dict, dict, dict]:
     """Run ELK bottom-up: per-subchart passes first, then chart root.
 
@@ -753,39 +815,53 @@ def elk_layout_bottomup(
     """
     all_transitions = chart_dict.get('transitions', [])
 
-    # --- 1. Collect all subchart paths ---
-    subchart_set: set = set()
+    # --- 1. Collect compound paths (subcharts and non-subchart states with children) ---
+    subchart_set: set = set()   # states with subchart: true
+    compound_set: set = set()   # all states with children (superset of subchart_set)
 
-    def _find_subcharts(states: dict, prefix: str) -> None:
+    def _find_compounds(states: dict, prefix: str) -> None:
         for name, body in states.items():
             path = f'{prefix}.{name}' if prefix else name
             if body.get('subchart'):
                 subchart_set.add(path)
-            _find_subcharts(body.get('states', {}), path)
+            if body.get('states'):
+                compound_set.add(path)
+            _find_compounds(body.get('states', {}), path)
 
-    _find_subcharts(chart_dict.get('states', {}), '')
+    _find_compounds(chart_dict.get('states', {}), '')
 
-    if not subchart_set:
+    if not compound_set:
         # No subcharts — single-pass is equivalent
-        elk_json = sf_to_elk_json(chart_dict, layout_options=layout_options,
+        _lo = _spacing_opts(chart_dict.get('transitions', []),
+                            chart_dict.get('states', {}).keys(),
+                            layout_options, adaptive_spacing)
+        elk_json = sf_to_elk_json(chart_dict, layout_options=_lo,
                                    max_label_width=max_label_width,
                                    label_substitution=label_substitution,
-                                   direction=direction, auto_sinks=auto_sinks)
+                                   direction=direction, auto_sinks=auto_sinks,
+                                   adaptive_leaf_width=adaptive_leaf_width)
+        _dump = Path(dump_dir) if dump_dir is not None else None
+        if _dump is not None:
+            _dump.mkdir(parents=True, exist_ok=True)
+            (_dump / 'elk_input.json').write_text(json.dumps(elk_json, indent=2), encoding='utf-8')
+        elk_result = elk_layout(elk_json)
+        if _dump is not None:
+            (_dump / 'elk_output.json').write_text(json.dumps(elk_result, indent=2), encoding='utf-8')
         return elk_to_stateflow_layout(
-            elk_layout(elk_json), chart_dict,
+            elk_result, chart_dict,
             sink_bus_junctions=sink_bus_junctions,
             sink_placement=sink_placement, auto_sinks=auto_sinks,
         )
 
-    # Deepest subcharts first
-    sorted_subcharts = sorted(subchart_set, key=lambda p: p.count('.'), reverse=True)
+    # Deepest compounds first (ensures children are laid out before their parents)
+    sorted_compounds = sorted(compound_set, key=lambda p: p.count('.'), reverse=True)
 
     all_positions: Dict[str, Tuple[int, int, int, int]] = {}
     all_edge_routing: dict = {}
     fixed_sizes: Dict[str, Tuple[int, int]] = {}
 
-    # --- 2. Per-subchart ELK runs ---
-    for sc_path in sorted_subcharts:
+    # --- 2. Per-compound ELK runs (subcharts and non-subchart compound states) ---
+    for sc_path in sorted_compounds:
         sc_body = _navigate_to(chart_dict, sc_path)
         sc_states = sc_body.get('states', {})
         if not sc_states:
@@ -818,16 +894,18 @@ def elk_layout_bottomup(
             if path.startswith(sc_prefix_dot)
         )
 
+        sc_lo = _spacing_opts(sc_transitions, sc_states.keys(), layout_options, adaptive_spacing)
         elk_json = sf_to_elk_json(
             {'states': sc_states, 'transitions': sc_transitions},
-            layout_options=layout_options, max_label_width=max_label_width,
+            layout_options=sc_lo, max_label_width=max_label_width,
             label_substitution=label_substitution, direction=direction,
             auto_sinks=sc_auto_sinks, fixed_sizes=sc_fixed,
+            adaptive_leaf_width=adaptive_leaf_width,
         )
         # Apply the subchart's own header height as top padding on the root
         # graph so child states land below the header label area.  Only set if
         # the caller hasn't already specified elk.padding in layout_options.
-        if 'elk.padding' not in (layout_options or {}):
+        if 'elk.padding' not in (sc_lo or {}):
             sc_header_h = _compound_header_h(sc_body)
             elk_json.setdefault('layoutOptions', {})['elk.padding'] = (
                 f'[top={sc_header_h + 20},right=20,bottom=20,left=20]'
@@ -895,24 +973,39 @@ def elk_layout_bottomup(
         _collect_run_er(elk_result, 0.0, 0.0)
 
         # Fixed size for the parent-level ELK run.
-        # By default subcharts are treated as opaque leaf nodes at the parent
-        # level — sized from their own label/actions (same as a collapsed
-        # Stateflow subchart box), not from internal content.
-        # subchart_leaf_size overrides this with an explicit (w, h) tuple.
-        if subchart_leaf_size is not None:
-            fixed_sizes[sc_path] = subchart_leaf_size
+        # Subcharts: collapsed leaf size (label/header only, no internal structure shown).
+        # Non-subchart compounds: actual ELK-computed bounding box (all children fit inside).
+        if sc_path in subchart_set:
+            if subchart_leaf_size is not None:
+                fixed_sizes[sc_path] = subchart_leaf_size
+            else:
+                from slxgen.stateflow import _sf_state_size  # noqa: PLC0415
+                _leaf_body = {k: v for k, v in sc_body.items() if k != 'states'}
+                fixed_sizes[sc_path] = _sf_state_size(
+                    _leaf_body, adaptive_leaf_width=adaptive_leaf_width,
+                    name=sc_path.split('.')[-1],
+                )
         else:
-            from slxgen.stateflow import _sf_state_size  # noqa: PLC0415
-            _leaf_body = {k: v for k, v in sc_body.items() if k != 'states'}
-            fixed_sizes[sc_path] = _sf_state_size(_leaf_body)
+            fixed_sizes[sc_path] = (int(elk_result.get('width', 0)),
+                                    int(elk_result.get('height', 0)))
 
     # --- 3. Chart-root ELK run (subcharts are fixed-size leaves) ---
+    root_lo = _spacing_opts(all_transitions,
+                            chart_dict.get('states', {}).keys(),
+                            layout_options, adaptive_spacing)
     root_elk_json = sf_to_elk_json(
-        chart_dict, layout_options=layout_options,
+        chart_dict, layout_options=root_lo,
         max_label_width=max_label_width, label_substitution=label_substitution,
         direction=direction, auto_sinks=auto_sinks, fixed_sizes=fixed_sizes,
+        adaptive_leaf_width=adaptive_leaf_width,
     )
+    _dump_root = Path(dump_dir) if dump_dir is not None else None
+    if _dump_root is not None:
+        _dump_root.mkdir(parents=True, exist_ok=True)
+        (_dump_root / 'elk_input.json').write_text(json.dumps(root_elk_json, indent=2), encoding='utf-8')
     root_elk_result = elk_layout(root_elk_json)
+    if _dump_root is not None:
+        (_dump_root / 'elk_output.json').write_text(json.dumps(root_elk_result, indent=2), encoding='utf-8')
 
     chart_global: Dict[str, Tuple[int, int, int, int]] = {}
 
@@ -924,8 +1017,8 @@ def elk_layout_bottomup(
                    int(node.get('width', 0)), int(node.get('height', 0)))
             chart_global[nid] = pos
             all_positions[nid] = pos
-        # Don't recurse into subcharts (their internals come from per-subchart runs)
-        if nid not in subchart_set:
+        # Don't recurse into compounds — their internals come from per-compound runs
+        if nid not in compound_set:
             for child in node.get('children', []):
                 _collect_root(child, nx, ny)
 
@@ -963,21 +1056,21 @@ def elk_layout_bottomup(
                 'mid_x': mid_x, 'mid_y': mid_y,
                 'src_oclock': src_oc, 'dst_oclock': dst_oc,
             }
-        if nid not in subchart_set:
+        if nid not in compound_set:
             for child in node.get('children', []):
                 _collect_root_er(child, nx, ny)
 
     _collect_root_er(root_elk_result, 0.0, 0.0)
 
-    # --- 4. Convert subchart-relative positions to chart-global ---
-    # Process shallowest subcharts first so nested offsets accumulate correctly.
-    for sc_path in reversed(sorted_subcharts):
+    # --- 4. Convert compound-relative positions to chart-global ---
+    # Process shallowest compounds first so nested offsets accumulate correctly.
+    for sc_path in reversed(sorted_compounds):
         if sc_path not in all_positions:
             continue
         sc_gx, sc_gy = all_positions[sc_path][:2]
         sc_prefix_dot = sc_path + '.'
-        # Deeper subchart prefixes — their children are handled in their own pass
-        deeper = tuple(p + '.' for p in subchart_set if p.startswith(sc_prefix_dot))
+        # Deeper compound prefixes — their children are handled in their own pass
+        deeper = tuple(p + '.' for p in compound_set if p.startswith(sc_prefix_dot))
         for full_path in list(all_positions.keys()):
             if not full_path.startswith(sc_prefix_dot):
                 continue
@@ -985,6 +1078,26 @@ def elk_layout_bottomup(
                 continue
             rx, ry, rw, rh = all_positions[full_path]
             all_positions[full_path] = (sc_gx + rx, sc_gy + ry, rw, rh)
+
+    # --- 4b. Offset edge-routing MidPoints for non-subchart compound transitions ---
+    # Per-compound ELK gives compound-relative mid_x/mid_y; MATLAB expects chart-absolute.
+    # Subchart transitions stay compound-relative (Stateflow reads them that way).
+    for sc_path in sorted_compounds:
+        if sc_path in subchart_set:
+            continue
+        if sc_path not in all_positions:
+            continue
+        sc_gx, sc_gy = all_positions[sc_path][:2]
+        sc_dot = sc_path + '.'
+        for eid, er in list(all_edge_routing.items()):
+            parts = eid.split('||')
+            if (len(parts) > 2
+                    and parts[1].startswith(sc_dot)
+                    and parts[2].startswith(sc_dot)):
+                all_edge_routing[eid] = {**er,
+                    'mid_x': er['mid_x'] + sc_gx,
+                    'mid_y': er['mid_y'] + sc_gy,
+                }
 
     # --- 5. Sink placement and sink junctions ---
     state_roles: Dict[str, str] = {}

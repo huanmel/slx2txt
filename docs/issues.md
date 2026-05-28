@@ -54,36 +54,36 @@ of `_NODE_SPACING`. Documented in [`docs/layout_default_transition.md`](layout_d
 
 ## ISS-002: Default (init) state not placed first at root level
 
-**Status:** `open`  
+**Status:** `fixed`  
 **Severity:** `minor`  
-**Component:** `elk_layout.py` — `sf_to_elk_json`, root-level layout pass
+**Component:** `elk_layout.py` — `elk_layout_bottomup`, `sf_to_elk_json`
 
 **Description:** The state with `default: true` at the chart root is not
 guaranteed to render at the top. In the HVAC chart, OFF (default) renders at
 the bottom while SEMI_OFF and ON are above it.
 
-**Root cause:** `elk.layered.layerConstraint = FIRST` is applied to default
-children inside compound-node builds but is silently ignored by ELK for
-compound root nodes when `elk.hierarchyHandling = SEPARATE_CHILDREN` is used.
-ELK's cycle-breaker (`GREEDY_MODEL_ORDER`) then sees ON→OFF and SEMI_OFF→OFF
-as forward edges and places OFF as a sink at the bottom.
+**Root cause (two parts):**
 
-**Workaround:** Use `role: init` explicitly — this adds a FIRST constraint
-inside the compound build. For root-level states this still may not work.
-Alternatively post-process positions to sort by `initial`.
+1. Non-subchart compound states were laid out inline in one monolithic ELK call.
+   `elk.layered.layerConstraint = FIRST` on a compound node is consumed by its
+   own internal layout pass under `SEPARATE_CHILDREN`, not by the parent layout.
+2. `elk.layered.cycleBreaking.strategy = GREEDY_MODEL_ORDER` does not reliably
+   place the init state first when it participates in cycles with other states.
 
-**Fix — approaches to investigate:**
+**Fix applied:**
 
-- Add a virtual priority edge from a dummy source node to the init state,
-  forcing ELK to treat it as a source.
-- Change `elk.layered.cycleBreaking.strategy` from `GREEDY_MODEL_ORDER` to
-  `DEPTH_FIRST` or `INTERACTIVE`.
-- Sort `root_children` by `default: true` first so `GREEDY_MODEL_ORDER`
-  assigns it model-order 0 and reverses all back-edges pointing to it.
-- Two-pass: fix init state at `y = container_top + padding` after first ELK
-  pass, then re-run edge routing only.
-
-See [`docs/layout_default_transition.md`](layout_default_transition.md) for full analysis.
+- `elk_layout_bottomup` extended to process ALL compound states bottom-up
+  (not just subcharts). Each compound gets its own ELK pass; the resulting
+  bounding box becomes a fixed-size leaf in the parent run. In the root pass,
+  OFF is now a leaf — the FIRST constraint and cycle-breaking work correctly on
+  leaf nodes.
+- Cross-compound edge endpoints are promoted in `sf_to_elk_json`: if a
+  transition source/target is inside a fixed-size compound, the endpoint is
+  promoted to the compound boundary so ELK receives valid node references.
+- Root-level cycle-breaking strategy changed from `GREEDY_MODEL_ORDER` to
+  `DEPTH_FIRST`. With DEPTH_FIRST, the DFS starts from the init state (first in
+  model order), and back-edges from descendants to the init state are reversed,
+  making it a source in the layered DAG and placing it at the top.
 
 ---
 
@@ -228,3 +228,66 @@ of a subchart use subchart-relative coordinates.
 **Fix applied:** Removed the `elif path_prefix` branch. Only states that are direct
 children of a subchart (where `_subchart_path` is set) use subchart-relative coords;
 all others use raw chart-absolute positions from the ELK layout.
+
+---
+
+## ISS-008: YAML boolean synonyms silently corrupt state names and transition targets
+
+**Status:** `open` (authoring hazard — no runtime detection)  
+**Severity:** `major`  
+**Component:** YAML authoring + `stateflow_sir.py` — `yaml_to_sir()`
+
+**Description:** PyYAML (`yaml.safe_load`, YAML 1.1) treats certain unquoted
+identifiers as boolean values rather than strings. State names or transition
+`from:`/`to:` values that match these synonyms are silently converted to Python
+`True` or `False`, which then fails state-path resolution at validation time with
+a confusing error rather than a clear "state name is reserved" message.
+
+Affected identifiers (any capitalisation):
+
+| Group | Values |
+| ----- | ------ |
+| True synonyms | `true`, `True`, `TRUE`, `yes`, `Yes`, `YES`, `on`, `On`, `ON` |
+| False synonyms | `false`, `False`, `FALSE`, `no`, `No`, `NO`, `off`, `Off`, `OFF` |
+
+**Common Stateflow names that trigger this:** `ON`, `OFF`, `YES`, `NO`.
+
+**Reproduction:**
+
+```yaml
+states:
+  ON:     # ← PyYAML parses this key as Python True, not the string "ON"
+    default: true
+  OFF:    # ← parsed as False
+
+transitions:
+  - from: ON    # ← True (boolean), not "ON"
+    to:   OFF   # ← False (boolean), not "OFF"
+    order: '1'
+```
+
+The validator then reports `ERROR: transition source 'True' not found` —
+confusing because `True` is not what was written.
+
+**Workaround:** Always quote any state name or transition target that matches
+a YAML 1.1 boolean synonym:
+
+```yaml
+states:
+  'ON':             # single or double quotes force string
+    default: true
+  'OFF':
+    default: false
+
+transitions:
+  - from: "ON"      # quoted → string
+    to:   "OFF"
+    order: '1'
+```
+
+Quoting the value in `from:`/`to:` is sufficient; quoting the state key in
+`states:` is also required.
+
+**Fix:** Add a pre-parse warning in `yaml_to_sir()` that detects state IDs or
+transition endpoints that are Python `bool` values and reports them with a
+clear message: `ERROR: state name parsed as boolean — quote it in the YAML`.

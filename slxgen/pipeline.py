@@ -38,11 +38,14 @@ def run_pipeline(
     out_dir=None,
     model_name=None,
     dump_sir=False,
+    dump_elk=False,
     run_matlab=False,
     session_name='slxgen',
     open_desktop=False,
     lint=True,
     elk_options=None,
+    adaptive_leaf_width=False,
+    adaptive_spacing=False,
     verbose=True,
 ):
     """Validate, generate, and optionally build a Stateflow model in MATLAB.
@@ -58,6 +61,9 @@ def run_pipeline(
     dump_sir : bool
         Write the SIR to ``<out_dir>/<stem>_sir.json`` after validation.
         Useful for debugging the intermediate representation.
+    dump_elk : bool
+        Write ELK input/output JSON to ``<out_dir>/elk_input.json`` and
+        ``<out_dir>/elk_output.json`` for layout inspection.
     run_matlab : bool
         Connect to (or start) a MATLAB Engine and build the .slx.
     session_name : str
@@ -71,6 +77,13 @@ def run_pipeline(
         Run sfLintChart on the generated .slx (only when run_matlab=True).
     elk_options : dict | None
         ELK layout options forwarded to sf_yaml_to_matlab.
+    adaptive_leaf_width : bool
+        Compute each leaf state's width from its longest label line instead of
+        using the fixed ``_SF_LEAF_W`` constant.  Wider states rarely hurt;
+        enable by default when chart labels are long.
+    adaptive_spacing : bool
+        Scale the ELK node gap per compound based on the number of labeled
+        transitions between sibling pairs, so stacked labels have room to breathe.
     verbose : bool
         Print step headers and status lines.
 
@@ -97,7 +110,13 @@ def run_pipeline(
     out_dir.mkdir(exist_ok=True)
     if model_name is None:
         model_name = yaml_path.stem
-    elk_options = elk_options or {}
+    elk_options = dict(elk_options) if elk_options else {}
+    if dump_elk:
+        elk_options['__dump_elk_dir__'] = str(out_dir)
+    if adaptive_leaf_width:
+        elk_options['__adaptive_leaf_width__'] = True
+    if adaptive_spacing:
+        elk_options['__adaptive_spacing__'] = True
 
     total_steps = 4 if run_matlab else 2
 

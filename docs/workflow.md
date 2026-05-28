@@ -58,6 +58,29 @@ Context packet (in order of importance):
   5. Target modeling level (0–3)       ← affects allowed constructs
 ```
 
+**YAML boolean trap** — PyYAML treats `ON`, `OFF`, `YES`, `NO`, `TRUE`, `FALSE`
+(any capitalisation) as boolean values unless quoted. Always quote state names
+and transition targets that match these words:
+
+```yaml
+# Wrong — ON and OFF silently become Python True / False
+states:
+  ON:
+  OFF:
+
+# Correct
+states:
+  'ON':
+  'OFF':
+transitions:
+  - from: "ON"
+    to:   "OFF"
+```
+
+See [ISS-008](../docs/issues.md#iss-008-yaml-boolean-synonyms-silently-corrupt-state-names-and-transition-targets) for full details.
+
+---
+
 **YAML schema summary** (paste this into the LLM prompt):
 
 ```yaml

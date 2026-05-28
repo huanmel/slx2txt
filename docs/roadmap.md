@@ -98,7 +98,8 @@ type mismatches are caught at MATLAB compile time. The warning should be suppres
 **b) All checks should be configurable**: Teams should be able to enable/disable
 checks and override severity per rule.
 
-Design — optional `slxgen_config.yaml` in the project directory:
+Design — optional `slxgen_config.yaml` in the project directory.
+The same file carries both validator and layout sections:
 
 ```yaml
 validator:
@@ -108,9 +109,26 @@ validator:
   missing_order: warning
   redundant_transition_action: warning
   inconsistent_output_paths: warning
+
+layout:
+  leaf_width: 150           # _SF_LEAF_W  — fixed width of leaf (childless) states, px
+  header_height: 22         # _SF_HEADER_H — title-bar overhead, px
+  line_height: 16           # _SF_LINE_H  — pixels per label line (en/du/ex actions)
+  node_spacing: 30          # ELK elk.spacing.nodeNode, px
+  default_transition_offset: 20   # dot placed this many px above destination top
+  direction: DOWN           # main layout axis: DOWN | RIGHT | UP | LEFT
+  edge_routing: SPLINES     # ELK edgeRouting: SPLINES | ORTHOGONAL | POLYLINE
 ```
 
+The `layout:` section exposes the named constants in `stateflow.py` and
+`elk_layout.py` without requiring code changes per model. ELK options that are
+already passable via `elk_options` dict in `run_pipeline()` are preserved as-is;
+the config file is an alternative authoring surface for the same knobs.
+
 `sir_validate(sir, config=None)` — config is optional; defaults match current behavior.
+
+`run_pipeline()` and `sf_yaml_to_matlab()` would auto-discover `slxgen_config.yaml`
+in the YAML file's directory (or accept an explicit `config_path` parameter).
 
 ### Priority 3 — Extensible verification plugin system
 
@@ -295,6 +313,21 @@ Implementation:
 Risk: low — the generated body is self-contained; only the outer wrapper changes.
 
 ### Priority 6 — YAML schema gaps (as needed)
+
+- **Variable size/dimensions**: `size:` field for inputs, outputs, and locals.
+  Default is scalar (`[1]`); vectors and matrices use a list: `size: [3, 1]`.
+
+  ```yaml
+  inputs:
+    - {name: vec_in,  type: single, size: [3, 1]}   # 3×1 column vector
+  outputs:
+    - {name: mat_out, type: double, size: [3, 3]}   # 3×3 matrix
+  locals:
+    - {name: x,       type: uint8,  size: [1]}      # scalar (explicit default)
+  ```
+
+  SIR: add `size: list[int]` to `SIRVariable`, default `[1]`.
+  Codegen: `data.Props.Array.Size = '[3 1]'` via the Stateflow Data API.
 
 - **Junctions**: decision nodes for shared transition routing — YAML key + codegen.
 - **Inner transitions**: `inner: true` — stays within source's active child.
