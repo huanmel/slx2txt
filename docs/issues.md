@@ -8,7 +8,7 @@ Issues are registered here with status tracking. For planned improvements see
 
 ## Template
 
-```
+```markdown
 ## ISS-NNN: Title
 **Status:** `open` | `mitigated` | `fixed`
 **Severity:** `blocker` | `major` | `minor` | `cosmetic`
@@ -99,6 +99,7 @@ beyond the state bounding box in both directions. No truncation occurs in the
 generated chart.
 
 **Reproduction:** Any transition with a long `condition:` string, e.g.:
+
 ```yaml
 condition: "blowerSpdReq > 0 || auto_press || defrost_press || dist_request
             || recirc_press || ac_press"
@@ -155,6 +156,7 @@ At MATLAB codegen time the variable cannot be typed and may produce an
 incorrectly formed data declaration.
 
 **Reproduction:**
+
 ```yaml
 outputs:
   - {name: recirc_request}   # no type field
@@ -291,3 +293,84 @@ Quoting the value in `from:`/`to:` is sufficient; quoting the state key in
 **Fix:** Add a pre-parse warning in `yaml_to_sir()` that detects state IDs or
 transition endpoints that are Python `bool` values and reports them with a
 clear message: `ERROR: state name parsed as boolean — quote it in the YAML`.
+
+---
+
+## ISS-009: Within-subchart transition labels overlap intermediate sibling states
+
+**Status:** `open`
+**Severity:** `major`
+**Component:** `stateflow.py` — `_push_label_outside_states`, `LabelPosition` placement
+
+**Description:** For transitions whose both endpoints are inside the same subchart
+(e.g. STANDBY_INIT → FAULT_ACTIVE inside ACTIVE.STANDBY), the generated
+`LabelPosition` places labels overlapping the destination state or intermediate
+sibling states. In the Stateflow editor the labels appear inside or directly on top
+of the FAULT_ACTIVE state box.
+
+**Reproduction:** `example/model_gen/DevCtrl_StMach_sf.yaml` — ACTIVE.STANDBY
+subchart contains states STANDBY_INIT, STANDBY_SYNC, STANDBY_IDLE, and FAULT_ACTIVE.
+Transitions STANDBY_INIT → FAULT_ACTIVE, STANDBY_SYNC → FAULT_ACTIVE, and
+STANDBY_IDLE → FAULT_ACTIVE all have labels that render inside FAULT_ACTIVE.
+Screenshot: `example/model_gen/generated/DevCtrl_StMach_DevCtrl_StMach_ACTIVE_STANDBY.png`
+
+**Root cause:** The `positions` dict stores all states at chart-absolute coordinates
+(`parent_chart_abs + subchart_relative`). FAULT_ACTIVE has a large subchart-relative y,
+so its chart-abs y is also large. `_push_label_outside_states` treats it as an
+intermediate state to push through even though it is the transition destination.
+The y_ceiling guard is ineffective because src/dst also have large chart-abs bottoms.
+
+**Workaround:** Accept the generated layout and manually adjust labels in the
+Stateflow editor after generation.
+
+**Analysis:** See [`docs/iss009_label_placement.md`](iss009_label_placement.md) for
+root cause walkthrough, coordinate examples, effort estimate, and recommended fix.
+
+**Fix direction:** Scope `_push_label_outside_states` to only check states within the
+LCA subtree. Pass `lca` into the function; filter `positions` to `lca + '.'` prefix;
+use the LCA bounding box bottom as `y_ceiling`. See analysis doc — Option B (2–3 h).
+Long-term: fixing arc routing (ISS-010) makes the push function nearly obsolete.
+
+---
+
+## ISS-010: Cross-compound transition arcs cut through intermediate state boxes
+
+**Status:** `open`
+**Severity:** `major`
+**Component:** `elk_layout.py` — edge routing, `stateflow.py` — arc emission
+
+**Description:** Transitions whose source and destination are not direct siblings
+(e.g. INIT → FAULT_ACTIVE where CONNECTING and READY lie between them) are drawn as
+near-vertical lines that visually cut through the intermediate compound state boxes.
+
+**Reproduction:** `example/model_gen/DevCtrl_StMach_sf.yaml` — ACTIVE.STARTUP
+subchart; transitions from INIT/CONNECTING and states inside READY all go straight
+down to FAULT_ACTIVE, cutting through the intermediate boxes.
+Screenshot: `example/model_gen/generated/DevCtrl_StMach_DevCtrl_StMach_ACTIVE_STARTUP.png`
+
+**Root cause:** ELK's layered (Sugiyama) algorithm assigns states to vertical layers
+and routes edges through the spacing gaps between layers. It guarantees no
+edge-edge crossings, but **does not guarantee that edges avoid the bounding boxes of
+nodes in other layers**. INIT (layer 0) and FAULT_ACTIVE (layer 3) are both centred
+at the same x column; ELK routes the arc straight down that column through the 50 px
+gaps. In ELK's abstract model the arc never enters a node — it passes through empty
+inter-layer space. In Stateflow's coordinate space, however, CONNECTING (layer 1) and
+READY (layer 2) occupy the same x column, so the straight arc geometrically passes
+through their bounding boxes and Stateflow renders it as cutting through them.
+
+This is by design in ELK — the mismatch is between ELK's topological correctness
+and Stateflow's geometric rendering. No ELK routing option prevents this for
+straight-column topologies; the fix must be post-ELK.
+
+**Workaround:** Accept the layout. The logic is correct; only the visual presentation
+is affected.
+
+**Analysis:** See [`docs/iss009_label_placement.md`](iss009_label_placement.md) for
+the connection to ISS-009 and the generalised junction-routing fix plan (Option A).
+
+**Fix direction:** Post-ELK detection in `stateflow.py`: after positions and
+edge_routing are computed, scan each transition for geometric intersection between the
+straight arc (src_center → dst_center) and intermediate peer state boxes. When an
+intersection is found, shift `er['mid_x']` left or right far enough to clear the
+intersecting state. This forces Stateflow to draw the arc as a side-detour without
+adding any junction objects. ~30 lines, no ELK changes. See analysis doc.

@@ -454,8 +454,13 @@ def _push_label_outside_states(mid_x: int, mid_y: int, positions: dict,
                                 margin: int = 15) -> tuple:
     """Push label anchor (mid_x, mid_y) down when it lands inside an intermediate state.
 
-    Skips states that are ancestors of src or dst. For any other state whose box
-    contains (mid_x, mid_y), shifts mid_y to just below the state box.
+    Excluded from the check: ancestors of src/dst (they contain the arc endpoints)
+    and all descendants of src/dst (subchart-internal states whose chart-absolute
+    coordinates may extend outside their parent's visible collapsed area).
+
+    Additionally, only pushes when the resulting y stays within the arc's bounding
+    y-extent (max of src/dst bottoms + margin), so that large sibling states in
+    subchart-relative coordinate spaces cannot push labels far below the chart.
 
     Returns (mid_x, mid_y).
     """
@@ -465,11 +470,28 @@ def _push_label_outside_states(mid_x: int, mid_y: int, positions: dict,
         parts = path.split('.')
         return {'.'.join(parts[:i + 1]) for i in range(len(parts))}
 
-    excluded = _ancestors(src_path) | _ancestors(dst_path)
+    # Exclude ancestors AND descendants of both src and dst
+    related = _ancestors(src_path) | _ancestors(dst_path)
+    excluded = {p for p in positions
+                if p in related
+                or (src_path and (p == src_path or p.startswith(src_path + '.')))
+                or (dst_path and (p == dst_path or p.startswith(dst_path + '.')))}
+
+    # Upper bound: don't push past the lower of the two state bottoms + margin
+    if src_path in positions and dst_path in positions:
+        _, sy, _, sh = positions[src_path]
+        _, dy, _, dh = positions[dst_path]
+        y_ceiling = max(sy + sh, dy + dh) + margin
+    else:
+        y_ceiling = None
 
     for state_path, (px, py, pw, ph) in positions.items():
-        if state_path not in excluded and px <= mid_x <= px + pw and py <= mid_y <= py + ph:
-            return mid_x, py + ph + margin
+        pushed = py + ph + margin
+        if (state_path not in excluded
+                and px <= mid_x <= px + pw
+                and py <= mid_y <= py + ph
+                and (y_ceiling is None or pushed <= y_ceiling)):
+            return mid_x, pushed
     return mid_x, mid_y
 
 
@@ -1206,7 +1228,7 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
                     ly = _stagger_label_y(ly, y_lo, y_hi, used, _SF_LABEL_STAGGER)
                     used.append(ly)
                     lw = min(max(int(len(label) * _SF_PX_PER_CHAR) + 20, 60), 300)
-                    lines.append(f"{tv}.LabelPosition = [{lx - lw // 2} {ly - _SF_LABEL_LINE_H // 2} {lw} {_SF_LABEL_LINE_H}];")
+                    lines.append(f"{tv}.LabelPosition = [{max(0, lx - lw // 2)} {ly - _SF_LABEL_LINE_H // 2} {lw} {_SF_LABEL_LINE_H}];")
                 lines.append(f"{tv}.SourceOClock = {er['src_oclock']};")
                 lines.append(f"{tv}.DestinationOClock = {er['dst_oclock']};")
             else:

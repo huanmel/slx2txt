@@ -74,6 +74,35 @@ def _label_size(text: str, max_width: int = _LABEL_MAX_WIDTH_PX) -> Tuple[int, i
     return w, h
 
 
+def _path_midpoint(start: dict, bend_points: list, end: dict) -> Tuple[int, int]:
+    """Return the point closest to the geometric midpoint of an ELK routed path.
+
+    Uses ELK's bendPoints so the result reflects the actual arc detour rather than
+    the straight-line midpoint between start and end.
+
+    0 bends → midpoint of start→end (unchanged behaviour).
+    1 bend  → the bend point itself (best single control for a side-detour arc).
+    2+ bends → geometric midpoint of the full polyline (arc-length parameterised).
+    """
+    if not bend_points:
+        return int((start['x'] + end['x']) / 2), int((start['y'] + end['y']) / 2)
+    if len(bend_points) == 1:
+        bp = bend_points[0]
+        return int(bp['x']), int(bp['y'])
+    pts = [start] + bend_points + [end]
+    segs = [math.hypot(b['x'] - a['x'], b['y'] - a['y']) for a, b in zip(pts, pts[1:])]
+    total = sum(segs)
+    if total == 0:
+        return int((start['x'] + end['x']) / 2), int((start['y'] + end['y']) / 2)
+    target, acc = total / 2, 0.0
+    for (a, b), seg in zip(zip(pts, pts[1:]), segs):
+        if acc + seg >= target:
+            t = (target - acc) / seg if seg else 0.0
+            return int(a['x'] + t * (b['x'] - a['x'])), int(a['y'] + t * (b['y'] - a['y']))
+        acc += seg
+    return int(end['x']), int(end['y'])
+
+
 _SINK_KEYWORDS       = ('FAULT', 'ERROR')     # keyword-based auto-detection for sink role
 _SINK_ROLE_ALIASES: frozenset = frozenset({'sink', 'fault', 'error'})  # accepted role: values
 _INIT_KEYWORDS       = ('INIT',)
@@ -470,9 +499,9 @@ def elk_to_stateflow_layout(elk_result: dict,
             start = sec.get('startPoint', {'x': 0, 'y': 0})
             end   = sec.get('endPoint',   {'x': 0, 'y': 0})
 
-            # Straight midpoint (LCA-relative, Stateflow MidPoint-ready).
-            mid_x = int((start['x'] + end['x']) / 2)
-            mid_y = int((start['y'] + end['y']) / 2)
+            # Path-aware midpoint: uses ELK bendPoints so the MidPoint reflects
+            # the actual arc detour rather than the straight chord centre.
+            mid_x, mid_y = _path_midpoint(start, sec.get('bendPoints', []), end)
 
             # Precise float OClock derived from exact ELK boundary attachment point.
             src_oclock = 3.0
@@ -950,8 +979,7 @@ def elk_layout_bottomup(
                 idx_s   = parts[3] if len(parts) > 3 else '0'
                 start = sec.get('startPoint', {'x': 0.0, 'y': 0.0})
                 end   = sec.get('endPoint',   {'x': 0.0, 'y': 0.0})
-                mid_x = int((start['x'] + end['x']) / 2)
-                mid_y = int((start['y'] + end['y']) / 2)
+                mid_x, mid_y = _path_midpoint(start, sec.get('bendPoints', []), end)
                 src_oc, dst_oc = 3.0, 9.0
                 if src_rel in _rp:
                     sx, sy, sw, sh = _rp[src_rel]
@@ -1041,8 +1069,7 @@ def elk_layout_bottomup(
             dst_p = parts[2] if len(parts) > 2 else ''
             start = sec.get('startPoint', {'x': 0.0, 'y': 0.0})
             end   = sec.get('endPoint',   {'x': 0.0, 'y': 0.0})
-            mid_x = int((start['x'] + end['x']) / 2)
-            mid_y = int((start['y'] + end['y']) / 2)
+            mid_x, mid_y = _path_midpoint(start, sec.get('bendPoints', []), end)
             src_oc, dst_oc = 3.0, 9.0
             if src_p in chart_global:
                 sx, sy, sw, sh = chart_global[src_p]

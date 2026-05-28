@@ -26,4 +26,6 @@ run_pipeline(
     session_name='slxgen',  # shared session name (created if no session found)
     open_desktop=False,     # True   → open full MATLAB GUI when starting new engine
     lint=True,
+    adaptive_leaf_width=True, adaptive_spacing=True,
+    verbose=True, default_size=[1]
 )
