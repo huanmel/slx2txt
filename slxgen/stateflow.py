@@ -8,10 +8,11 @@ from typing import Dict, List, Any
 
 try:
     from slxgen.elk_layout import (sf_to_elk_json, elk_layout, elk_to_stateflow_layout,  # noqa: F401
-                                    elk_layout_bottomup)
+                                    elk_layout_bottomup, _DEFAULT_TRANS_OFFSET)
     _ELK_AVAILABLE = True
 except ImportError:
     _ELK_AVAILABLE = False
+    _DEFAULT_TRANS_OFFSET = 20
 
 from slxgen.stateflow_sir import yaml_to_sir, sir_validate, sir_to_chart_dict
 
@@ -704,7 +705,7 @@ def _emit_sf_default_transition(
     if dst_pos is not None:
         x, y, w, h = dst_pos
         dot_x = x + w // 2
-        dot_y = max(y - 10, 0)
+        dot_y = max(y - _DEFAULT_TRANS_OFFSET, 0)
         mid_y = (dot_y + y) // 2
         lines.append(f"{tv}.SourceEndPoint = [{dot_x} {dot_y}];")
         lines.append(f"{tv}.MidPoint = [{dot_x} {mid_y}];")

@@ -22,6 +22,11 @@ _COMPOUND_HEADER_LINE_H = 16   # px per text line in compound state header (matc
 _COMPOUND_HEADER_MIN_H  = 30   # minimum top padding (state name only)
 _DEFAULT_TRANSITION_PAD = 40   # extra top padding so default-transition dot fits inside container
 
+# --- Layout spacing defaults (edit here to tune the generated chart appearance) ---
+_NODE_SPACING         = 30   # px gap between sibling states (ELK nodeNode / nodeNodeBetweenLayers)
+_DEFAULT_TRANS_OFFSET = 20   # px above destination state top for the default-transition dot
+                              # must satisfy: _DEFAULT_TRANS_OFFSET < _NODE_SPACING
+
 
 def _label_size(text: str, max_width: int = _LABEL_MAX_WIDTH_PX) -> Tuple[int, int]:
     """Estimate (width_px, height_px) for a transition label string."""
@@ -147,8 +152,8 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
         opts = {
             'elk.padding':                                  f'[top={top_pad},right=20,bottom=20,left=20]',
             'elk.direction':                                node_direction,
-            'elk.spacing.nodeNode':                         '20',
-            'elk.layered.spacing.nodeNodeBetweenLayers':    '20',
+            'elk.spacing.nodeNode':                         str(_NODE_SPACING),
+            'elk.layered.spacing.nodeNodeBetweenLayers':    str(_NODE_SPACING),
             'elk.layered.layering.strategy':                'LONGEST_PATH',
             'elk.layered.cycleBreaking.strategy':           'GREEDY_MODEL_ORDER',
             'elk.layered.nodePlacement.strategy':           'LINEAR_SEGMENTS',
@@ -288,8 +293,8 @@ def sf_to_elk_json(chart_dict: dict, layout_options: 'dict | None' = None,
         'elk.algorithm':                                'layered',
         'elk.direction':                                direction,
         'elk.hierarchyHandling':                        'SEPARATE_CHILDREN',
-        'elk.spacing.nodeNode':                         '20',
-        'elk.layered.spacing.nodeNodeBetweenLayers':    '20',
+        'elk.spacing.nodeNode':                         str(_NODE_SPACING),
+        'elk.layered.spacing.nodeNodeBetweenLayers':    str(_NODE_SPACING),
         'elk.layered.layering.strategy':                'LONGEST_PATH',
         'elk.layered.cycleBreaking.strategy':           'GREEDY_MODEL_ORDER',
         'elk.layered.nodePlacement.strategy':           'LINEAR_SEGMENTS',
@@ -673,8 +678,7 @@ def _compute_sink_junctions(positions: dict, state_roles: dict,
         # Use the near edge of each source state rather than its center, so the entry
         # junction sits outside the source box rather than overlapping it.  We need the
         # approximate gateway y first to decide which edge is "near".
-        # Keep _EDGE_GAP small: with nodeNodeBetweenLayers=20 the inter-state gap is only
-        # 20 px, so 15 px would place junctions only 5 px (< radius=5) from the next state.
+        # Keep _EDGE_GAP < _NODE_SPACING // 2 so junctions don't overlap the adjacent state.
         _EDGE_GAP = 8  # px outside the source box so the junction clears the border
         def _entry_jy(src: str) -> int:
             _, sy, _, sh = positions[src]
