@@ -314,20 +314,23 @@ Risk: low — the generated body is self-contained; only the outer wrapper chang
 
 ### Priority 6 — YAML schema gaps (as needed)
 
-- **Variable size/dimensions**: `size:` field for inputs, outputs, and locals.
-  Default is scalar (`[1]`); vectors and matrices use a list: `size: [3, 1]`.
+- **Variable size/dimensions** ✓ implemented: `size:` field for inputs, outputs,
+  and locals. Default is scalar — omitting `size:` or writing `size: [1]` both
+  produce a scalar signal and no `Props.Array.Size` property is emitted (Stateflow
+  default). To disable the feature for a variable, simply omit the field.
 
   ```yaml
   inputs:
-    - {name: vec_in,  type: single, size: [3, 1]}   # 3×1 column vector
+    - {name: vec_in,  type: single, size: [3, 1]}   # 3×1 column vector → Props.Array.Size = '[3 1]'
+    - {name: flag,    type: boolean}                 # scalar — size: omitted, no size property emitted
   outputs:
-    - {name: mat_out, type: double, size: [3, 3]}   # 3×3 matrix
+    - {name: mat_out, type: double, size: [3, 3]}   # 3×3 matrix → Props.Array.Size = '[3 3]'
   locals:
-    - {name: x,       type: uint8,  size: [1]}      # scalar (explicit default)
+    - {name: x,       type: uint8,  size: [1]}      # explicit scalar — same as omitting size:
   ```
 
-  SIR: add `size: list[int]` to `SIRVariable`, default `[1]`.
-  Codegen: `data.Props.Array.Size = '[3 1]'` via the Stateflow Data API.
+  SIR: `SIRVariable.size` — always `[1]` when unspecified; propagated through
+  `sir_to_chart_dict()`. Codegen emits `Props.Array.Size` only when size ≠ `[1]`.
 
 - **Junctions**: decision nodes for shared transition routing — YAML key + codegen.
 - **Inner transitions**: `inner: true` — stays within source's active child.
