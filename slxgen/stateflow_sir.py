@@ -76,6 +76,8 @@ def yaml_to_sir(chart_dict: dict, default_size: list | None = None) -> SIRModel:
         None / [1] → scalar (Stateflow default, no Props.Array.Size emitted).
         [-1]        → inherited from the connected signal.
     """
+    if default_size is not None and not isinstance(default_size, list):
+        raise TypeError(f"default_size must be a list (e.g. [1] or [-1]), got {type(default_size).__name__!r}: {default_size!r}")
     name = chart_dict.get('name', 'unnamed')
     _default_size = default_size if default_size is not None else [1]
 
