@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import sys
 from collections import defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,7 @@ class SIRVariable:
     scope: str           # 'input' | 'output' | 'local'
     type: str | None
     initial_value: Any        # None if unspecified in YAML
-    size: list = field(default_factory=lambda: [1])  # [1] = scalar default; [3,1] = column vector; [3,3] = matrix
+    size: list | None = None  # None = not specified (no Props.Array.Size emitted); [1] = explicit scalar; [-1] = inherited
 
 
 @dataclass
@@ -79,7 +79,6 @@ def yaml_to_sir(chart_dict: dict, default_size: list | None = None) -> SIRModel:
     if default_size is not None and not isinstance(default_size, list):
         raise TypeError(f"default_size must be a list (e.g. [1] or [-1]), got {type(default_size).__name__!r}: {default_size!r}")
     name = chart_dict.get('name', 'unnamed')
-    _default_size = default_size if default_size is not None else [1]
 
     # --- Variables ---
     variables: list[SIRVariable] = []
@@ -91,7 +90,7 @@ def yaml_to_sir(chart_dict: dict, default_size: list | None = None) -> SIRModel:
                 scope=scope_label,
                 type=v.get('type'),
                 initial_value=v.get('initial_value'),
-                size=v.get('size', _default_size),
+                size=v.get('size', default_size),
             ))
 
     # --- States (recursive flatten, depth-first pre-order) ---
@@ -364,7 +363,8 @@ def sir_to_chart_dict(sir: SIRModel) -> dict:
             entry['type'] = v.type
         if v.initial_value is not None:
             entry['initial_value'] = v.initial_value
-        entry['size'] = v.size
+        if v.size is not None:
+            entry['size'] = v.size
         var_lists[scope_keys[v.scope]].append(entry)
 
     # --- States: flat list -> nested dict ---

@@ -940,7 +940,7 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
             lines.append(f"{v}.DataType = '{_escape_matlab_str(d['type'])}';")
         if d.get('initial_value') is not None:
             lines.append(f"{v}.Props.InitialValue = '{_escape_matlab_str(str(d['initial_value']))}';")
-        if d.get('size') and d['size'] != [1]:
+        if 'size' in d:
             size_str = ' '.join(str(n) for n in d['size'])
             lines.append(f"{v}.Props.Array.Size = '[{size_str}]';")
 
@@ -958,7 +958,7 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
             lines.append(f"{v}.DataType = '{_escape_matlab_str(d['type'])}';")
         if d.get('initial_value') is not None:
             lines.append(f"{v}.Props.InitialValue = '{_escape_matlab_str(str(d['initial_value']))}';")
-        if d.get('size') and d['size'] != [1]:
+        if 'size' in d:
             size_str = ' '.join(str(n) for n in d['size'])
             lines.append(f"{v}.Props.Array.Size = '[{size_str}]';")
 
@@ -976,7 +976,7 @@ def stateflow_dict_to_matlab(chart_dict: Dict, model_name: 'str | None' = None,
             lines.append(f"{v}.DataType = '{_escape_matlab_str(d['type'])}';")
         if d.get('initial_value') is not None:
             lines.append(f"{v}.Props.InitialValue = '{_escape_matlab_str(str(d['initial_value']))}';")
-        if d.get('size') and d['size'] != [1]:
+        if 'size' in d:
             size_str = ' '.join(str(n) for n in d['size'])
             lines.append(f"{v}.Props.Array.Size = '[{size_str}]';")
 

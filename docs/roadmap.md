@@ -331,26 +331,26 @@ Risk: low — the generated body is self-contained; only the outer wrapper chang
 
   | `size:` value | Meaning | `Props.Array.Size` emitted |
   | --- | --- | --- |
-  | omitted | scalar (default) | no — Stateflow default |
-  | `[1]` | explicit scalar | no — same as omitting |
-  | `[n, m]` | n×m array | yes — `'[n m]'` |
-  | `[-1]` | inherited from connected signal | yes — `'[-1]'` |
+  | omitted + `default_size=None` | not set — Stateflow decides (default = inherited) | no |
+  | omitted + `default_size=[1]` | explicit scalar | yes — `'[1]'` |
+  | omitted + `default_size=[-1]` | explicit inherited | yes — `'[-1]'` |
+  | `[1]` in YAML | explicit scalar | yes — `'[1]'` |
+  | `[n, m]` in YAML | n×m array | yes — `'[n m]'` |
+  | `[-1]` in YAML | inherited | yes — `'[-1]'` |
 
-  SIR: `SIRVariable.size` — always set; `[1]` when unspecified (configurable).
-  Codegen emits `Props.Array.Size` only when size ≠ `[1]`.
+  SIR: `SIRVariable.size` is `None` when unspecified (no size key in the
+  generated dict → no `Props.Array.Size` emitted). Codegen emits the property
+  whenever the `size` key is present, regardless of value.
 
-  **Configuring the default** — pass `default_size` to any entry point to change
-  what unspecified variables receive:
+  **Configuring the default** — pass `default_size` to any entry point:
 
   ```python
-  # All variables without size: become inherited
-  run_pipeline('my.yaml', default_size=[-1])
-  sf_yaml_to_matlab('my.yaml', 'out.m', default_size=[-1])
-  yaml_to_sir(chart_dict, default_size=[-1])
+  run_pipeline('my.yaml', default_size=[1])   # force explicit scalar on all unspecified vars
+  run_pipeline('my.yaml', default_size=[-1])  # force explicit inherited on all unspecified vars
+  run_pipeline('my.yaml')                     # default_size=None — leave it to Stateflow
   ```
 
-  Per-variable overrides still work: an explicit `size:` in the YAML always takes
-  precedence over `default_size`.
+  An explicit `size:` in the YAML always takes precedence over `default_size`.
 
 - **Junctions**: decision nodes for shared transition routing — YAML key + codegen.
 - **Inner transitions**: `inner: true` — stays within source's active child.

@@ -88,11 +88,13 @@ name: ChartName
 
 inputs:
   - {name: signal_in, type: boolean}
-  - {name: vec_in, type: single, size: [3, 1]}  # 3×1 column vector → Props.Array.Size = '[3 1]'
-  - {name: inh_in, type: single, size: [-1]}   # inherited from connected signal → Props.Array.Size = '[-1]'
-  # size: omitted / size: [1] → scalar (default); no Props.Array.Size emitted
-  # size: [n, m]              → n×m array; Props.Array.Size = '[n m]'
-  # size: [-1]                → inherited; Props.Array.Size = '[-1]'
+  - {name: vec_in, type: single, size: [3, 1]}  # 3×1 vector  → Props.Array.Size = '[3 1]'
+  - {name: sc_in,  type: uint8,  size: [1]}    # explicit scalar → Props.Array.Size = '[1]'
+  - {name: inh_in, type: single, size: [-1]}   # inherited      → Props.Array.Size = '[-1]'
+  - {name: def_in, type: boolean}              # size: omitted  → controlled by default_size parameter
+  # size: omitted + default_size=None (default) → no Props.Array.Size emitted; Stateflow decides (inherited)
+  # size: omitted + default_size=[1]            → Props.Array.Size = '[1]' (explicit scalar)
+  # size: omitted + default_size=[-1]           → Props.Array.Size = '[-1]' (explicit inherited)
 
 outputs:
   - {name: mode_out, type: uint8, initial_value: 0}
