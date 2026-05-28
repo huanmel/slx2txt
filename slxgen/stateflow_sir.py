@@ -450,6 +450,80 @@ def sir_to_dict(sir: SIRModel, source: str = '', issues: list[str] | None = None
     }
 
 
+# ---------------------------------------------------------------------------
+# Mermaid stateDiagram-v2 backend
+# ---------------------------------------------------------------------------
+
+def _mermaid_label(t: SIRTransition) -> str:
+    """Build a compact Mermaid transition label from condition and/or action."""
+    parts = []
+    if t.condition:
+        parts.append(t.condition)
+    if t.action:
+        parts.append('/' + t.action)
+    return ' '.join(parts)
+
+
+def sir_to_mermaid(sir: SIRModel) -> str:
+    """Convert a SIRModel to a Mermaid stateDiagram-v2 string."""
+    lines = ['stateDiagram-v2']
+
+    children: dict[str | None, list[SIRState]] = defaultdict(list)
+    for s in sir.states:
+        children[s.parent].append(s)
+    for lst in children.values():
+        lst.sort(key=lambda s: (not s.initial, s.name))
+
+    child_ids: set[str] = set(children.keys()) - {None}
+
+    def emit(parent_id: str | None, indent: int) -> None:
+        pad = '  ' * indent
+        for s in children.get(parent_id, []):
+            if s.initial:
+                lines.append(f'{pad}[*] --> {s.name}')
+            if s.role in ('sink', 'fault', 'error'):
+                lines.append(f'{pad}{s.name} : <<fault>>')
+            if s.id in child_ids:
+                lines.append(f'{pad}state {s.name} {{')
+                if s.decomp == 'AND':
+                    and_children = children[s.id]
+                    for j, region in enumerate(and_children):
+                        if region.initial:
+                            lines.append(f'{pad}  [*] --> {region.name}')
+                        if region.id in child_ids:
+                            lines.append(f'{pad}  state {region.name} {{')
+                            emit(region.id, indent + 2)
+                            lines.append(f'{pad}  }}')
+                        if j < len(and_children) - 1:
+                            lines.append(f'{pad}  --')
+                else:
+                    emit(s.id, indent + 1)
+                lines.append(f'{pad}}}')
+
+    emit(None, 1)
+
+    lines.append('')
+    for t in sir.transitions:
+        src = t.source.rsplit('.', 1)[-1]
+        tgt = t.target.rsplit('.', 1)[-1]
+        label = _mermaid_label(t)
+        arrow = f' : {label}' if label else ''
+        lines.append(f'  {src} --> {tgt}{arrow}')
+
+    return '\n'.join(lines)
+
+
+def sf_yaml_to_mermaid(yaml_path: str | Path, default_size: list | None = None) -> str:
+    """Load an sf.yaml file and return a Mermaid stateDiagram-v2 string."""
+    import yaml as _yaml
+
+    chart_dict = _yaml.safe_load(Path(yaml_path).read_text(encoding='utf-8'))
+    sir = yaml_to_sir(chart_dict, default_size=default_size)
+    return sir_to_mermaid(sir)
+
+
+# ---------------------------------------------------------------------------
+
 def sf_yaml_to_sir_json(yaml_path: str | Path, output_path: str | Path | None = None,
                         indent: int = 2) -> str:
     """Load an sf.yaml file, run SIR normalization + validation, return JSON string.

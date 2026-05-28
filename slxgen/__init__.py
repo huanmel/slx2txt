@@ -14,6 +14,7 @@ from .slx2txt import (
 )
 from .slx_lint import slx_lint, print_lint_report
 from .pipeline import run_pipeline
+from .stateflow_sir import sir_to_mermaid, sf_yaml_to_mermaid
 
 __all__ = [
     'parse_slx',
@@ -31,4 +32,6 @@ __all__ = [
     'slx_lint',
     'print_lint_report',
     'run_pipeline',
+    'sir_to_mermaid',
+    'sf_yaml_to_mermaid',
 ]
